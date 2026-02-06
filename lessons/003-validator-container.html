@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 3: The Validator Container — Daily Ethereum Knowledge</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟠</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <a href="../" style="text-decoration: none; color: inherit;">
+                <h1>⟠ Daily Ethereum Knowledge</h1>
+            </a>
+        </div>
+    </header>
+    
+    <main class="container lesson-content">
+        <article>
+            <header class="lesson-header">
+                <span class="lesson-number">Lesson 3</span>
+                <h1>The Validator Container</h1>
+                <div class="lesson-meta">
+                    <time>2026-02-06</time>
+                    <span>phase0/beacon-chain.md → Validator</span>
+                </div>
+            </header>
+            
+            <div class="lesson-body">
+                <p><em>The atomic unit of stake in Ethereum consensus</em></p>
+
+                <h2>🔍 Spec Location</h2>
+                <p><code>phase0/beacon-chain.md</code> → <code>Validator</code> container</p>
+                <p>Every validator in the beacon chain—all 1M+ of them—is represented by a single 121-byte SSZ container:</p>
+
+                <pre><code>class Validator(Container):
+    pubkey: BLSPubkey            # 48 bytes
+    withdrawal_credentials: Bytes32  # 32 bytes
+    effective_balance: Gwei      # 8 bytes
+    slashed: boolean             # 1 byte
+    activation_eligibility_epoch: Epoch  # 8 bytes
+    activation_epoch: Epoch      # 8 bytes
+    exit_epoch: Epoch            # 8 bytes
+    withdrawable_epoch: Epoch    # 8 bytes</code></pre>
+
+                <p>The validator list lives in <code>BeaconState.validators</code> with a theoretical limit of 2^40 entries (1.1 trillion)—though we're at ~1M today.</p>
+
+                <h2>💡 Field-by-Field Breakdown</h2>
+
+                <h3>1. <code>pubkey</code> (BLSPubkey = Bytes48)</h3>
+                <p>The BLS12-381 public key. This is the validator's <em>identity</em>—used to verify signatures on blocks, attestations, and RANDAO reveals.</p>
+                <p>Key property: <strong>immutable after deposit</strong>. You can't change your pubkey. If you lose the corresponding private key, the validator is permanently unrecoverable.</p>
+
+                <h3>2. <code>withdrawal_credentials</code> (Bytes32)</h3>
+                <p>Controls where ETH goes on exit. The first byte is a prefix:</p>
+                <ul>
+                    <li><code>0x00</code> — BLS credentials (legacy, requires BLS-to-execution change)</li>
+                    <li><code>0x01</code> — ETH1 address credentials (can withdraw)</li>
+                    <li><code>0x02</code> — Compounding credentials (Electra: auto-restakes rewards)</li>
+                </ul>
+                <p><strong>Gotcha:</strong> You can upgrade 0x00→0x01 or 0x00→0x02, but you can't downgrade 0x02→0x01. Compounding is sticky.</p>
+
+                <h3>3. <code>effective_balance</code> (Gwei)</h3>
+                <p>Not your actual balance—that's in <code>BeaconState.balances[i]</code>. Effective balance is a <em>quantized</em> version used for all consensus calculations:</p>
+                <ul>
+                    <li>Rounded down to nearest 1 ETH (<code>EFFECTIVE_BALANCE_INCREMENT</code>)</li>
+                    <li>Capped at 32 ETH (pre-Electra) or 2048 ETH (Electra compounding)</li>
+                    <li>Updated with hysteresis to prevent thrashing</li>
+                </ul>
+                <pre><code># Effective balance update logic (simplified)
+if balance + DOWNWARD_THRESHOLD &lt; effective_balance:
+    effective_balance -= 1 ETH
+elif balance >= effective_balance + UPWARD_THRESHOLD:
+    effective_balance += 1 ETH</code></pre>
+                <p><strong>Why?</strong> Two reasons:</p>
+                <ol>
+                    <li><strong>Performance:</strong> Attestation rewards scale with effective balance. If we used real balances, every reward would cause different committee weights → massive state churn.</li>
+                    <li><strong>Hysteresis:</strong> You need to drop ~0.25 ETH below the threshold before your effective balance decreases. Prevents oscillation.</li>
+                </ol>
+
+                <h3>4. <code>slashed</code> (boolean)</h3>
+                <p>True = this validator committed a slashable offense (double-propose or surround/double-vote). Once slashed:</p>
+                <ul>
+                    <li>Immediate penalty: <code>effective_balance / 4096</code> (Electra)</li>
+                    <li>Correlation penalty at <code>withdrawable_epoch</code></li>
+                    <li>Can't unslash. Ever.</li>
+                </ul>
+
+                <h3>5. <code>activation_eligibility_epoch</code> (Epoch)</h3>
+                <p>Set to the epoch when the validator became <em>eligible</em> to enter the activation queue. Conditions:</p>
+                <ul>
+                    <li>Deposit processed</li>
+                    <li>Effective balance ≥ 32 ETH (<code>MIN_ACTIVATION_BALANCE</code>)</li>
+                </ul>
+                <p>This is NOT when they activate—just when they're allowed to queue.</p>
+
+                <h3>6. <code>activation_epoch</code> (Epoch)</h3>
+                <p>When this validator actually becomes active. Set during <code>process_registry_updates</code>:</p>
+                <pre><code>def is_eligible_for_activation(state, validator):
+    return (
+        validator.activation_eligibility_epoch &lt;= state.finalized_checkpoint.epoch
+        and validator.activation_epoch == FAR_FUTURE_EPOCH
+    )</code></pre>
+                <p>Note: activation requires <em>finalization</em> of the eligibility epoch. This is a subtle security property—you can't game activation timing during non-finality.</p>
+
+                <h3>7. <code>exit_epoch</code> (Epoch)</h3>
+                <p>Set when the validator initiates exit (voluntary or forced). Before exit: <code>FAR_FUTURE_EPOCH</code> (2^64-1).</p>
+
+                <h3>8. <code>withdrawable_epoch</code> (Epoch)</h3>
+                <p>When the validator's balance becomes withdrawable. Set to:</p>
+                <ul>
+                    <li><code>exit_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY</code> (256 epochs ≈ 27 hours) for normal exits</li>
+                    <li>Extended for slashed validators (for correlation penalty calculation)</li>
+                </ul>
+
+                <h2>🔗 The Lifecycle Epochs</h2>
+                <pre><code>FAR_FUTURE → eligibility → activation → [active] → exit → withdrawable
+     ↓            ↓            ↓                      ↓         ↓
+  pending      queued      attesting              exiting   can withdraw</code></pre>
+
+                <h2>🛠 Key Predicates</h2>
+                <pre><code>def is_active_validator(validator, epoch):
+    return validator.activation_epoch &lt;= epoch &lt; validator.exit_epoch</code></pre>
+                <p>Simple interval check. Active validators attest and can be selected as proposers.</p>
+
+                <pre><code>def is_slashable_validator(validator, epoch):
+    return (not validator.slashed) and (
+        validator.activation_epoch &lt;= epoch &lt; validator.withdrawable_epoch
+    )</code></pre>
+                <p><strong>Key insight:</strong> You can be slashed even after <code>exit_epoch</code>, up until <code>withdrawable_epoch</code>. This prevents "exit then misbehave" attacks.</p>
+
+                <h2>⚠️ Gotchas & Edge Cases</h2>
+                <ol>
+                    <li><strong>Balance vs Effective Balance:</strong> Never confuse them. <code>balances[i]</code> is precise, <code>validators[i].effective_balance</code> is quantized.</li>
+                    <li><strong>Ejection:</strong> If <code>effective_balance &lt; 16 ETH</code>, you get force-exited.</li>
+                    <li><strong>MaxEB (Electra):</strong> Validators with 0x02 credentials can have effective_balance up to 2048 ETH. The container didn't change—just the cap.</li>
+                    <li><strong>State bloat:</strong> Each validator is 121 bytes. At 1M validators: ~121MB just for the validator list.</li>
+                </ol>
+
+                <h2>❓ Design Rationale</h2>
+                <p><strong>Q: Why separate <code>validators</code> list from <code>balances</code> list?</strong></p>
+                <p>A: SSZ merkleization. If balances were inside Validator, every balance change would require re-merkleizing the entire validator. With separate lists, balance updates only touch <code>balances</code> tree.</p>
+
+                <p><strong>Q: Why 4 epoch fields instead of a state enum?</strong></p>
+                <p>A: Explicit epochs enable lookahead calculations, historical queries without replaying state, and parallel processing.</p>
+
+                <p><strong>Q: Why <code>FAR_FUTURE_EPOCH</code> as sentinel?</strong></p>
+                <p>A: Cleaner than nullable. <code>epoch &lt; FAR_FUTURE_EPOCH</code> is always true for real epochs, so "not yet set" works naturally in comparisons.</p>
+
+                <h2>📖 Spec Reference</h2>
+                <ul>
+                    <li><code>phase0/beacon-chain.md#validator</code></li>
+                    <li><code>electra/beacon-chain.md#gwei-values</code> (for MaxEB)</li>
+                    <li><code>initiate_validator_exit</code>, <code>slash_validator</code> for lifecycle mutations</li>
+                </ul>
+            </div>
+        </article>
+        
+        <nav class="lesson-nav">
+            <a href="002-slots-epochs-time.html">← Lesson 2</a>
+            <a href="../">All Lessons</a>
+        </nav>
+    </main>
+    
+    <footer>
+        <div class="container">
+            <p>Source: <a href="https://github.com/nerolation/daily-eth-knowledge">github.com/nerolation/daily-eth-knowledge</a></p>
+        </div>
+    </footer>
+</body>
+</html>

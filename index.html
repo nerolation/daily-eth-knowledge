@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Ethereum Knowledge</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟠</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>⟠ Daily Ethereum Knowledge</h1>
+            <p class="subtitle">Deep dives into the Ethereum consensus specification</p>
+        </div>
+    </header>
+    
+    <main class="container">
+        <section class="intro">
+            <p>A daily series exploring Ethereum's consensus layer — from data structures to fork choice, from BLS signatures to state transitions. Each lesson dissects the actual specification with code, rationale, and edge cases.</p>
+        </section>
+        
+        <section class="lessons">
+            <h2>Lessons</h2>
+            <div id="lesson-list">
+                <!-- Lessons will be listed here -->
+                <noscript>
+                    <p>Browse the <a href="lessons/">lessons directory</a> directly.</p>
+                </noscript>
+            </div>
+        </section>
+        
+        <section class="about">
+            <h2>About</h2>
+            <p>Generated from the <a href="https://github.com/ethereum/consensus-specs">ethereum/consensus-specs</a> repository. Each lesson references specific spec files and line numbers for verification.</p>
+            <p>Created by <a href="https://github.com/nerolation">@nerolation</a> with help from <a href="https://openclaw.ai">OpenClaw</a>.</p>
+        </section>
+    </main>
+    
+    <footer>
+        <div class="container">
+            <p>Source: <a href="https://github.com/nerolation/daily-eth-knowledge">github.com/nerolation/daily-eth-knowledge</a></p>
+        </div>
+    </footer>
+    
+    <script>
+        // Fetch and display lessons from lessons/index.json
+        fetch('lessons/index.json')
+            .then(r => r.json())
+            .then(lessons => {
+                const list = document.getElementById('lesson-list');
+                list.innerHTML = lessons.map(lesson => `
+                    <article class="lesson-card">
+                        <a href="lessons/${lesson.file}">
+                            <span class="lesson-number">Lesson ${lesson.number}</span>
+                            <h3>${lesson.title}</h3>
+                            <time>${lesson.date}</time>
+                        </a>
+                    </article>
+                `).join('');
+            })
+            .catch(() => {
+                document.getElementById('lesson-list').innerHTML = 
+                    '<p>Loading lessons... <a href="lessons/">Browse directly</a></p>';
+            });
+    </script>
+</body>
+</html>

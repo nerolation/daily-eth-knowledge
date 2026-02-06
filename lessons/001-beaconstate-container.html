@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 1: The BeaconState Container — Daily Ethereum Knowledge</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟠</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <a href="../" style="text-decoration: none; color: inherit;">
+                <h1>⟠ Daily Ethereum Knowledge</h1>
+            </a>
+        </div>
+    </header>
+    
+    <main class="container lesson-content">
+        <article>
+            <header class="lesson-header">
+                <span class="lesson-number">Lesson 1</span>
+                <h1>The BeaconState Container</h1>
+                <div class="lesson-meta">
+                    <time>2026-02-02</time>
+                    <span>phase0/beacon-chain.md → BeaconState</span>
+                </div>
+            </header>
+            
+            <div class="lesson-body">
+                <p><em>The central data structure of Ethereum consensus</em></p>
+
+                <h2>🔍 Overview</h2>
+                <p>Everything in Ethereum's consensus layer revolves around one data structure: <code>BeaconState</code>. It's the complete snapshot of the beacon chain at any given slot — containing every validator, every balance, every checkpoint, and all the historical data needed to validate new blocks.</p>
+
+                <h2>📦 The Container</h2>
+                <pre><code>class BeaconState(Container):
+    # Versioning
+    genesis_time: uint64
+    genesis_validators_root: Root
+    slot: Slot
+    fork: Fork
+    
+    # History
+    latest_block_header: BeaconBlockHeader
+    block_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]
+    state_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]
+    historical_roots: List[Root, HISTORICAL_ROOTS_LIMIT]
+    
+    # Eth1
+    eth1_data: Eth1Data
+    eth1_data_votes: List[Eth1Data, ...]
+    eth1_deposit_index: uint64
+    
+    # Registry
+    validators: List[Validator, VALIDATOR_REGISTRY_LIMIT]
+    balances: List[Gwei, VALIDATOR_REGISTRY_LIMIT]
+    
+    # Randomness
+    randao_mixes: Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR]
+    
+    # Slashings
+    slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
+    
+    # Participation (Altair+)
+    previous_epoch_participation: List[ParticipationFlags, ...]
+    current_epoch_participation: List[ParticipationFlags, ...]
+    
+    # Finality
+    justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]
+    previous_justified_checkpoint: Checkpoint
+    current_justified_checkpoint: Checkpoint
+    finalized_checkpoint: Checkpoint
+    
+    # Sync committees (Altair+)
+    current_sync_committee: SyncCommittee
+    next_sync_committee: SyncCommittee
+    
+    # Execution (Bellatrix+)
+    latest_execution_payload_header: ExecutionPayloadHeader</code></pre>
+
+                <h2>💡 Key Insights</h2>
+                
+                <h3>Why separate <code>validators</code> and <code>balances</code>?</h3>
+                <p>SSZ merkleization efficiency. Balances change every epoch (rewards/penalties), but validator records rarely change. Separating them means balance updates only touch the <code>balances</code> tree, not the entire validator list.</p>
+
+                <h3>Rolling history windows</h3>
+                <p><code>block_roots</code> and <code>state_roots</code> are fixed-size vectors (8192 slots ≈ 27 hours). Old history gets batched into <code>historical_roots</code>. This bounds state size while maintaining necessary lookback for attestation validation.</p>
+
+                <h3>The state root commitment</h3>
+                <p>Every <code>BeaconBlock</code> includes <code>state_root</code> — the <code>hash_tree_root(state)</code> after applying that block. This 32-byte value commits to the entire state, enabling light client proofs.</p>
+
+                <h2>🔗 Fork Evolution</h2>
+                <table>
+                    <tr><th>Fork</th><th>Additions</th></tr>
+                    <tr><td>Altair</td><td>participation flags, sync committees, inactivity scores</td></tr>
+                    <tr><td>Bellatrix</td><td>latest_execution_payload_header</td></tr>
+                    <tr><td>Capella</td><td>withdrawal indices, historical_summaries</td></tr>
+                    <tr><td>Electra</td><td>pending deposits/withdrawals/consolidations</td></tr>
+                </table>
+
+                <h2>📖 Spec Reference</h2>
+                <p><code>consensus-specs/specs/phase0/beacon-chain.md</code> lines 567-588</p>
+            </div>
+        </article>
+        
+        <nav class="lesson-nav">
+            <a href="../">← All Lessons</a>
+            <a href="002-slots-epochs-time.html">Lesson 2 →</a>
+        </nav>
+    </main>
+    
+    <footer>
+        <div class="container">
+            <p>Source: <a href="https://github.com/nerolation/daily-eth-knowledge">github.com/nerolation/daily-eth-knowledge</a></p>
+        </div>
+    </footer>
+</body>
+</html>

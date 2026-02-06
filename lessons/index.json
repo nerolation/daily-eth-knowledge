@@ -1,0 +1,20 @@
+[
+  {
+    "file": "003-validator-container.html",
+    "title": "The Validator Container",
+    "date": "2026-02-06",
+    "number": 3
+  },
+  {
+    "file": "002-slots-epochs-time.html",
+    "title": "Slots, Epochs, and Time",
+    "date": "2026-02-03",
+    "number": 2
+  },
+  {
+    "file": "001-beaconstate-container.html",
+    "title": "The BeaconState Container",
+    "date": "2026-02-02",
+    "number": 1
+  }
+]

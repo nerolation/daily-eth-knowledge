@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 2: Slots, Epochs, and Time — Daily Ethereum Knowledge</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟠</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <a href="../" style="text-decoration: none; color: inherit;">
+                <h1>⟠ Daily Ethereum Knowledge</h1>
+            </a>
+        </div>
+    </header>
+    
+    <main class="container lesson-content">
+        <article>
+            <header class="lesson-header">
+                <span class="lesson-number">Lesson 2</span>
+                <h1>Slots, Epochs, and Time</h1>
+                <div class="lesson-meta">
+                    <time>2026-02-03</time>
+                    <span>phase0/beacon-chain.md → Time parameters</span>
+                </div>
+            </header>
+            
+            <div class="lesson-body">
+                <p><em>The heartbeat of Ethereum consensus</em></p>
+
+                <h2>🔍 The Time Model</h2>
+                <p>Ethereum's consensus layer divides time into discrete units. Unlike the execution layer (which has variable block times), the beacon chain has a fixed rhythm:</p>
+
+                <pre><code>SECONDS_PER_SLOT = 12
+SLOTS_PER_EPOCH = 32
+
+# Derived
+SECONDS_PER_EPOCH = 12 * 32 = 384 seconds ≈ 6.4 minutes</code></pre>
+
+                <h2>⏱️ Slots</h2>
+                <p>A <strong>slot</strong> is a 12-second window where exactly one validator is selected to propose a block. Key properties:</p>
+                <ul>
+                    <li>Slots are numbered from 0 (genesis)</li>
+                    <li>Every slot has a designated proposer (even if they miss it)</li>
+                    <li>Missing a slot is fine — the chain continues</li>
+                    <li>Attestations reference specific slots</li>
+                </ul>
+
+                <pre><code>def compute_time_at_slot(state: BeaconState, slot: Slot) -> uint64:
+    return state.genesis_time + slot * SECONDS_PER_SLOT</code></pre>
+
+                <h2>📅 Epochs</h2>
+                <p>An <strong>epoch</strong> is 32 slots (~6.4 minutes). Epochs are the unit of:</p>
+                <ul>
+                    <li><strong>Finality</strong>: Checkpoints are at epoch boundaries</li>
+                    <li><strong>Rewards/penalties</strong>: Calculated once per epoch</li>
+                    <li><strong>Shuffling</strong>: Committees are fixed for an epoch</li>
+                    <li><strong>Effective balance updates</strong>: Hysteresis applied per epoch</li>
+                </ul>
+
+                <pre><code>def compute_epoch_at_slot(slot: Slot) -> Epoch:
+    return Epoch(slot // SLOTS_PER_EPOCH)
+
+def compute_start_slot_at_epoch(epoch: Epoch) -> Slot:
+    return Slot(epoch * SLOTS_PER_EPOCH)</code></pre>
+
+                <h2>💡 Why These Numbers?</h2>
+                
+                <h3>Why 12 seconds?</h3>
+                <p>Trade-off between latency and global propagation. 12s gives enough time for:</p>
+                <ul>
+                    <li>Block propagation worldwide (~2-4s)</li>
+                    <li>Attestation creation and aggregation (~4s)</li>
+                    <li>Network jitter tolerance</li>
+                </ul>
+
+                <h3>Why 32 slots per epoch?</h3>
+                <p>Balances committee size vs. epoch duration. With ~500k validators:</p>
+                <ul>
+                    <li>Each validator attests once per epoch</li>
+                    <li>~16k validators per slot</li>
+                    <li>128 validators per committee (for aggregation)</li>
+                </ul>
+
+                <h2>🔗 Timing Within a Slot</h2>
+                <pre><code>t=0s:  Slot starts, proposer broadcasts block
+t=4s:  Attestation deadline (SECONDS_PER_SLOT / 3)
+t=8s:  Aggregation deadline (2 * SECONDS_PER_SLOT / 3)
+t=12s: Next slot begins</code></pre>
+
+                <h2>⚠️ Edge Cases</h2>
+                <ul>
+                    <li><strong>Slot 0</strong>: Genesis slot, no parent</li>
+                    <li><strong>Empty slots</strong>: Chain advances even without blocks</li>
+                    <li><strong>Epoch boundaries</strong>: Trigger <code>process_epoch</code></li>
+                </ul>
+
+                <h2>📖 Spec Reference</h2>
+                <p><code>consensus-specs/specs/phase0/beacon-chain.md</code> → Time parameters, <code>compute_epoch_at_slot</code>, <code>compute_start_slot_at_epoch</code></p>
+            </div>
+        </article>
+        
+        <nav class="lesson-nav">
+            <a href="001-beaconstate-container.html">← Lesson 1</a>
+            <a href="003-validator-container.html">Lesson 3 →</a>
+        </nav>
+    </main>
+    
+    <footer>
+        <div class="container">
+            <p>Source: <a href="https://github.com/nerolation/daily-eth-knowledge">github.com/nerolation/daily-eth-knowledge</a></p>
+        </div>
+    </footer>
+</body>
+</html>

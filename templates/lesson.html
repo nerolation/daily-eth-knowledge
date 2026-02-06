@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson {{NUMBER}}: {{TITLE}} — Daily Ethereum Knowledge</title>
+    <link rel="stylesheet" href="../assets/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⟠</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <a href="../" style="text-decoration: none; color: inherit;">
+                <h1>⟠ Daily Ethereum Knowledge</h1>
+            </a>
+        </div>
+    </header>
+    
+    <main class="container lesson-content">
+        <article>
+            <header class="lesson-header">
+                <span class="lesson-number">Lesson {{NUMBER}}</span>
+                <h1>{{TITLE}}</h1>
+                <div class="lesson-meta">
+                    <time>{{DATE}}</time>
+                    <span>{{SPEC_REF}}</span>
+                </div>
+            </header>
+            
+            <div class="lesson-body">
+                {{CONTENT}}
+            </div>
+        </article>
+        
+        <nav class="lesson-nav">
+            <a href="../">← All Lessons</a>
+            {{NAV_NEXT}}
+        </nav>
+    </main>
+    
+    <footer>
+        <div class="container">
+            <p>Source: <a href="https://github.com/nerolation/daily-eth-knowledge">github.com/nerolation/daily-eth-knowledge</a></p>
+        </div>
+    </footer>
+</body>
+</html>
