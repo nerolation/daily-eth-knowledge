@@ -23,7 +23,7 @@
                 <h1>Slots, Epochs, and Time</h1>
                 <div class="lesson-meta">
                     <time>2026-02-03</time>
-                    <span>phase0/beacon-chain.md → Time parameters</span>
+                    <span>phase0/beacon-chain.md lines 264, 882-904</span>
                 </div>
             </header>
             
@@ -33,11 +33,16 @@
                 <h2>🔍 The Time Model</h2>
                 <p>Ethereum's consensus layer divides time into discrete units. Unlike the execution layer (which has variable block times), the beacon chain has a fixed rhythm:</p>
 
-                <pre><code>SECONDS_PER_SLOT = 12
+                <pre><code># From preset (line 264)
 SLOTS_PER_EPOCH = 32
+
+# From configuration
+SECONDS_PER_SLOT = 12
 
 # Derived
 SECONDS_PER_EPOCH = 12 * 32 = 384 seconds ≈ 6.4 minutes</code></pre>
+
+                <p><em>Note: <code>SECONDS_PER_SLOT</code> was moved from preset to configuration, as it could theoretically differ between networks.</em></p>
 
                 <h2>⏱️ Slots</h2>
                 <p>A <strong>slot</strong> is a 12-second window where exactly one validator is selected to propose a block. Key properties:</p>
@@ -48,8 +53,10 @@ SECONDS_PER_EPOCH = 12 * 32 = 384 seconds ≈ 6.4 minutes</code></pre>
                     <li>Attestations reference specific slots</li>
                 </ul>
 
-                <pre><code>def compute_time_at_slot(state: BeaconState, slot: Slot) -> uint64:
-    return state.genesis_time + slot * SECONDS_PER_SLOT</code></pre>
+                <pre><code># Line 882
+def compute_time_at_slot(state: BeaconState, slot: Slot) -> uint64:
+    slots_since_genesis = slot - GENESIS_SLOT
+    return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)</code></pre>
 
                 <h2>📅 Epochs</h2>
                 <p>An <strong>epoch</strong> is 32 slots (~6.4 minutes). Epochs are the unit of:</p>
@@ -60,9 +67,11 @@ SECONDS_PER_EPOCH = 12 * 32 = 384 seconds ≈ 6.4 minutes</code></pre>
                     <li><strong>Effective balance updates</strong>: Hysteresis applied per epoch</li>
                 </ul>
 
-                <pre><code>def compute_epoch_at_slot(slot: Slot) -> Epoch:
+                <pre><code># Line 890
+def compute_epoch_at_slot(slot: Slot) -> Epoch:
     return Epoch(slot // SLOTS_PER_EPOCH)
 
+# Line 900
 def compute_start_slot_at_epoch(epoch: Epoch) -> Slot:
     return Slot(epoch * SLOTS_PER_EPOCH)</code></pre>
 
@@ -77,11 +86,11 @@ def compute_start_slot_at_epoch(epoch: Epoch) -> Slot:
                 </ul>
 
                 <h3>Why 32 slots per epoch?</h3>
-                <p>Balances committee size vs. epoch duration. With ~500k validators:</p>
+                <p>Balances committee size vs. epoch duration. With ~900k validators:</p>
                 <ul>
                     <li>Each validator attests once per epoch</li>
-                    <li>~16k validators per slot</li>
-                    <li>128 validators per committee (for aggregation)</li>
+                    <li>~28k validators per slot</li>
+                    <li>~440 validators per committee (64 committees per slot)</li>
                 </ul>
 
                 <h2>🔗 Timing Within a Slot</h2>
@@ -92,13 +101,19 @@ t=12s: Next slot begins</code></pre>
 
                 <h2>⚠️ Edge Cases</h2>
                 <ul>
-                    <li><strong>Slot 0</strong>: Genesis slot, no parent</li>
-                    <li><strong>Empty slots</strong>: Chain advances even without blocks</li>
-                    <li><strong>Epoch boundaries</strong>: Trigger <code>process_epoch</code></li>
+                    <li><strong>Slot 0</strong>: Genesis slot — <code>GENESIS_SLOT = Slot(0)</code></li>
+                    <li><strong>Empty slots</strong>: No block, but slot still counts for time</li>
+                    <li><strong>Epoch boundaries</strong>: <code>slot % SLOTS_PER_EPOCH == 0</code> triggers <code>process_epoch</code></li>
+                    <li><strong>Attestation inclusion</strong>: Valid for <code>SLOTS_PER_EPOCH</code> slots (32 slots = 1 epoch)</li>
                 </ul>
 
                 <h2>📖 Spec Reference</h2>
-                <p><code>consensus-specs/specs/phase0/beacon-chain.md</code> → Time parameters, <code>compute_epoch_at_slot</code>, <code>compute_start_slot_at_epoch</code></p>
+                <ul>
+                    <li><code>phase0/beacon-chain.md</code> line 264 — <code>SLOTS_PER_EPOCH</code> preset</li>
+                    <li><code>phase0/beacon-chain.md</code> line 882 — <code>compute_time_at_slot</code></li>
+                    <li><code>phase0/beacon-chain.md</code> line 890 — <code>compute_epoch_at_slot</code></li>
+                    <li><code>phase0/beacon-chain.md</code> line 900 — <code>compute_start_slot_at_epoch</code></li>
+                </ul>
             </div>
         </article>
         

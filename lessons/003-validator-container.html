@@ -23,7 +23,7 @@
                 <h1>The Validator Container</h1>
                 <div class="lesson-meta">
                     <time>2026-02-06</time>
-                    <span>phase0/beacon-chain.md → Validator</span>
+                    <span>phase0/beacon-chain.md line 392</span>
                 </div>
             </header>
             
@@ -82,8 +82,13 @@ elif balance >= effective_balance + UPWARD_THRESHOLD:
                 <h3>4. <code>slashed</code> (boolean)</h3>
                 <p>True = this validator committed a slashable offense (double-propose or surround/double-vote). Once slashed:</p>
                 <ul>
-                    <li>Immediate penalty: <code>effective_balance / 4096</code> (Electra)</li>
-                    <li>Correlation penalty at <code>withdrawable_epoch</code></li>
+                    <li>Immediate penalty:
+                        <ul>
+                            <li>Phase 0 → Deneb: <code>effective_balance / 128</code> (~0.25 ETH for 32 ETH stake)</li>
+                            <li>Electra: <code>effective_balance / 4096</code> (~0.008 ETH for 32 ETH stake)</li>
+                        </ul>
+                    </li>
+                    <li>Correlation penalty at <code>withdrawable_epoch</code> (scales with total slashed in period)</li>
                     <li>Can't unslash. Ever.</li>
                 </ul>
 
@@ -150,9 +155,10 @@ elif balance >= effective_balance + UPWARD_THRESHOLD:
 
                 <h2>📖 Spec Reference</h2>
                 <ul>
-                    <li><code>phase0/beacon-chain.md#validator</code></li>
-                    <li><code>electra/beacon-chain.md#gwei-values</code> (for MaxEB)</li>
-                    <li><code>initiate_validator_exit</code>, <code>slash_validator</code> for lifecycle mutations</li>
+                    <li><code>phase0/beacon-chain.md</code> line 392 — Validator container</li>
+                    <li><code>phase0/beacon-chain.md</code> line 288 — <code>MIN_SLASHING_PENALTY_QUOTIENT = 128</code></li>
+                    <li><code>electra/beacon-chain.md</code> line 168 — <code>MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA = 4096</code></li>
+                    <li><code>phase0/beacon-chain.md</code> line 1248 — <code>slash_validator</code> penalty calculation</li>
                 </ul>
             </div>
         </article>

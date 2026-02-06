@@ -23,7 +23,7 @@
                 <h1>The BeaconState Container</h1>
                 <div class="lesson-meta">
                     <time>2026-02-02</time>
-                    <span>phase0/beacon-chain.md → BeaconState</span>
+                    <span>phase0/beacon-chain.md lines 567-588</span>
                 </div>
             </header>
             
@@ -33,7 +33,8 @@
                 <h2>🔍 Overview</h2>
                 <p>Everything in Ethereum's consensus layer revolves around one data structure: <code>BeaconState</code>. It's the complete snapshot of the beacon chain at any given slot — containing every validator, every balance, every checkpoint, and all the historical data needed to validate new blocks.</p>
 
-                <h2>📦 The Container</h2>
+                <h2>📦 Phase 0 Definition</h2>
+                <p>The original Phase 0 state structure (lines 567-588):</p>
                 <pre><code>class BeaconState(Container):
     # Versioning
     genesis_time: uint64
@@ -43,13 +44,13 @@
     
     # History
     latest_block_header: BeaconBlockHeader
-    block_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]
-    state_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]
+    block_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]      # 8192 slots
+    state_roots: Vector[Root, SLOTS_PER_HISTORICAL_ROOT]      # 8192 slots
     historical_roots: List[Root, HISTORICAL_ROOTS_LIMIT]
     
     # Eth1
     eth1_data: Eth1Data
-    eth1_data_votes: List[Eth1Data, ...]
+    eth1_data_votes: List[Eth1Data, EPOCHS_PER_ETH1_VOTING_PERIOD * SLOTS_PER_EPOCH]
     eth1_deposit_index: uint64
     
     # Registry
@@ -62,22 +63,15 @@
     # Slashings
     slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
     
-    # Participation (Altair+)
-    previous_epoch_participation: List[ParticipationFlags, ...]
-    current_epoch_participation: List[ParticipationFlags, ...]
+    # Attestations (Phase 0 only — replaced in Altair)
+    previous_epoch_attestations: List[PendingAttestation, MAX_ATTESTATIONS * SLOTS_PER_EPOCH]
+    current_epoch_attestations: List[PendingAttestation, MAX_ATTESTATIONS * SLOTS_PER_EPOCH]
     
     # Finality
-    justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]
+    justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]  # 4 bits
     previous_justified_checkpoint: Checkpoint
     current_justified_checkpoint: Checkpoint
-    finalized_checkpoint: Checkpoint
-    
-    # Sync committees (Altair+)
-    current_sync_committee: SyncCommittee
-    next_sync_committee: SyncCommittee
-    
-    # Execution (Bellatrix+)
-    latest_execution_payload_header: ExecutionPayloadHeader</code></pre>
+    finalized_checkpoint: Checkpoint</code></pre>
 
                 <h2>💡 Key Insights</h2>
                 
@@ -92,15 +86,26 @@
 
                 <h2>🔗 Fork Evolution</h2>
                 <table>
-                    <tr><th>Fork</th><th>Additions</th></tr>
-                    <tr><td>Altair</td><td>participation flags, sync committees, inactivity scores</td></tr>
-                    <tr><td>Bellatrix</td><td>latest_execution_payload_header</td></tr>
-                    <tr><td>Capella</td><td>withdrawal indices, historical_summaries</td></tr>
-                    <tr><td>Electra</td><td>pending deposits/withdrawals/consolidations</td></tr>
+                    <tr><th>Fork</th><th>State Changes</th></tr>
+                    <tr><td>Altair</td><td><code>previous/current_epoch_attestations</code> → <code>previous/current_epoch_participation</code> (flags); add <code>inactivity_scores</code>, <code>current_sync_committee</code>, <code>next_sync_committee</code></td></tr>
+                    <tr><td>Bellatrix</td><td>Add <code>latest_execution_payload_header</code></td></tr>
+                    <tr><td>Capella</td><td>Add <code>next_withdrawal_index</code>, <code>next_withdrawal_validator_index</code>, <code>historical_summaries</code> (replaces <code>historical_roots</code>)</td></tr>
+                    <tr><td>Deneb</td><td>No state changes</td></tr>
+                    <tr><td>Electra</td><td>Add <code>deposit_requests_start_index</code>, <code>pending_deposits</code>, <code>pending_partial_withdrawals</code>, <code>pending_consolidations</code>, and balance consumption tracking fields</td></tr>
                 </table>
 
+                <h2>📊 Key Constants</h2>
+                <pre><code>SLOTS_PER_HISTORICAL_ROOT = 8192        # ~27 hours of block/state roots
+EPOCHS_PER_HISTORICAL_VECTOR = 65536    # ~290 days of RANDAO mixes
+EPOCHS_PER_SLASHINGS_VECTOR = 8192      # ~36 days for correlation penalty
+VALIDATOR_REGISTRY_LIMIT = 2**40        # ~1.1 trillion theoretical max</code></pre>
+
                 <h2>📖 Spec Reference</h2>
-                <p><code>consensus-specs/specs/phase0/beacon-chain.md</code> lines 567-588</p>
+                <ul>
+                    <li><code>phase0/beacon-chain.md</code> lines 567-588 — Phase 0 BeaconState</li>
+                    <li><code>altair/beacon-chain.md</code> lines 159-190 — Altair modifications</li>
+                    <li><code>bellatrix/beacon-chain.md</code> lines 117-146 — Execution payload header</li>
+                </ul>
             </div>
         </article>
         
