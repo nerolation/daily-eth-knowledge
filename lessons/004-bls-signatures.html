@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 4: BLS Signatures Deep Dive | Ethereum Consensus Specs</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5em; }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+        code {
+            font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 0.9em;
+        }
+        .spec-ref {
+            color: #8b949e;
+            font-style: italic;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .warning {
+            background: #3d1f1f;
+            border-left: 4px solid #f85149;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        .insight {
+            background: #1f3d1f;
+            border-left: 4px solid #3fb950;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 4: BLS Signatures Deep Dive</h1>
+    
+    <p class="spec-ref">Spec: phase0/beacon-chain.md → BLS signatures, altair/bls.md</p>
+    
+    <h2>🎯 Core Question</h2>
+    <p>How do 500,000+ validators sign things efficiently?</p>
+
+    <h2>💡 The Problem BLS Solves</h2>
+    <p>Ethereum has ~1M validators. Each slot, ~400,000 attest. If we used ECDSA (like Ethereum L1 transactions), we'd need:</p>
+    <ul>
+        <li>400,000 × 65 bytes = <strong>26 MB of signatures per slot</strong></li>
+        <li>400,000 separate verifications</li>
+    </ul>
+    <p>With BLS aggregation, we get:</p>
+    <ul>
+        <li><strong>1 signature = 96 bytes</strong> (aggregated)</li>
+        <li><strong>1 verification</strong> (with aggregated pubkey)</li>
+    </ul>
+    <p>This is the entire reason BLS12-381 was chosen over secp256k1.</p>
+
+    <h2>🔧 The Curve: BLS12-381</h2>
+    <p>A pairing-friendly elliptic curve with two groups:</p>
+    <ul>
+        <li><strong>G1</strong>: 48-byte public keys (<code>BLSPubkey</code>)</li>
+        <li><strong>G2</strong>: 96-byte signatures (<code>BLSSignature</code>)</li>
+    </ul>
+    <p>The "12-381" means:</p>
+    <ul>
+        <li>Embedding degree 12 (enables efficient pairings)</li>
+        <li>381-bit prime field (128-bit security level)</li>
+    </ul>
+    <div class="insight">
+        <strong>Key property:</strong> Bilinear pairings enable checking <code>e(aG₁, bG₂) = e(G₁, G₂)^(ab)</code> — this is what makes aggregation work.
+    </div>
+
+    <h2>🛠 The BLS Functions (IETF Standard)</h2>
+    <p>From <code>phase0/beacon-chain.md</code> (lines 696-701):</p>
+    <pre><code># Ciphersuite: BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_
+
+def Sign(privkey: int, message: Bytes) -> BLSSignature
+def Verify(pubkey: BLSPubkey, message: Bytes, signature: BLSSignature) -> bool
+def Aggregate(signatures: Sequence[BLSSignature]) -> BLSSignature
+def FastAggregateVerify(pubkeys: Sequence[BLSPubkey], message: Bytes, signature: BLSSignature) -> bool
+def AggregateVerify(pubkeys: Sequence[BLSPubkey], messages: Sequence[Bytes], signature: BLSSignature) -> bool
+def KeyValidate(pubkey: BLSPubkey) -> bool</code></pre>
+    
+    <div class="warning">
+        <strong>Critical distinction:</strong>
+        <ul>
+            <li><code>FastAggregateVerify</code>: Same message, many signers → <strong>attestations</strong></li>
+            <li><code>AggregateVerify</code>: Different messages, many signers → less common</li>
+        </ul>
+    </div>
+
+    <h2>🔐 Domain Separation: Preventing Replay</h2>
+    <p>Every BLS signature in Ethereum includes a <strong>domain</strong>. From line 936:</p>
+    <pre><code>def compute_domain(domain_type: DomainType, fork_version: Version, 
+                   genesis_validators_root: Root) -> Domain:
+    fork_data_root = compute_fork_data_root(fork_version, genesis_validators_root)
+    return Domain(domain_type + fork_data_root[:28])</code></pre>
+    
+    <p>The domain contains:</p>
+    <ol>
+        <li><strong>Purpose</strong> (4 bytes): <code>DOMAIN_BEACON_PROPOSER</code>, <code>DOMAIN_BEACON_ATTESTER</code>, <code>DOMAIN_RANDAO</code>, etc.</li>
+        <li><strong>Fork version</strong> (4 bytes): Prevents cross-fork replay</li>
+        <li><strong>Genesis root</strong> (28 bytes): Prevents cross-chain replay</li>
+    </ol>
+    <div class="insight">
+        <strong>Result:</strong> A valid attestation signature from mainnet cannot be replayed on a testnet, different fork, or as a block proposal.
+    </div>
+
+    <h2>🎯 Attestation Signature Verification</h2>
+    <p>From <code>is_valid_indexed_attestation</code> (lines 776-790):</p>
+    <pre><code>def is_valid_indexed_attestation(state: BeaconState, 
+                                  indexed_attestation: IndexedAttestation) -> bool:
+    indices = indexed_attestation.attesting_indices
+    # Must have signers, sorted, unique
+    if len(indices) == 0 or not indices == sorted(set(indices)):
+        return False
+    
+    # Aggregate pubkeys of all attesters
+    pubkeys = [state.validators[i].pubkey for i in indices]
+    
+    # Domain is BEACON_ATTESTER at target epoch
+    domain = get_domain(state, DOMAIN_BEACON_ATTESTER, 
+                        indexed_attestation.data.target.epoch)
+    signing_root = compute_signing_root(indexed_attestation.data, domain)
+    
+    # ONE verification for potentially thousands of signatures
+    return bls.FastAggregateVerify(pubkeys, signing_root, 
+                                   indexed_attestation.signature)</code></pre>
+    
+    <div class="insight">
+        <strong>The magic:</strong> <code>FastAggregateVerify(pks, msg, sig)</code> checks that <code>sig = Σ Sign(sk_i, msg)</code> for all corresponding secret keys. One pairing check instead of N.
+    </div>
+
+    <h2>⚡ Sync Committee Optimization (Altair)</h2>
+    <p>Sync committees push aggregation further. From <code>process_sync_aggregate</code>:</p>
+    <pre><code>class SyncCommittee(Container):
+    pubkeys: Vector[BLSPubkey, SYNC_COMMITTEE_SIZE]  # 512 keys
+    aggregate_pubkey: BLSPubkey  # Pre-computed sum!</code></pre>
+    
+    <p>Three verification paths:</p>
+    <ol>
+        <li><strong>All 512 participated</strong>: Use precomputed <code>aggregate_pubkey</code> → 1 pubkey, 1 verification</li>
+        <li><strong>>256 participated</strong>: Subtract non-participants from aggregate (elliptic curve subtraction)</li>
+        <li><strong>≤256 participated</strong>: Aggregate participants directly</li>
+    </ol>
+    <p>Full sync committee participation = <strong>single pubkey verification</strong>.</p>
+
+    <h2>🔗 The Empty Pubkey Edge Case (Altair)</h2>
+    <p>From <code>altair/bls.md</code>:</p>
+    <pre><code>G2_POINT_AT_INFINITY = BLSSignature(b'\xc0' + b'\x00' * 95)
+
+def eth_fast_aggregate_verify(pubkeys, message, signature) -> bool:
+    # Special case: zero signers
+    if len(pubkeys) == 0 and signature == G2_POINT_AT_INFINITY:
+        return True
+    return bls.FastAggregateVerify(pubkeys, message, signature)</code></pre>
+    
+    <p><strong>Why?</strong> Without this, sync aggregates with zero participation would have no valid signature. The point at infinity is the identity element — mathematically correct.</p>
+
+    <h2>⚠️ Gotchas & Edge Cases</h2>
+    <ol>
+        <li><strong>Rogue key attack</strong>: Prevented by proof-of-possession in <code>KeyValidate</code> and deposit proofs</li>
+        <li><strong>Signature malleability</strong>: BLS signatures are unique — no malleability</li>
+        <li><strong>Zero signatures</strong>: The G2 point at infinity represents "nothing signed"</li>
+        <li><strong>Verification cost</strong>: Pairing is expensive (~1ms). Batching helps but isn't free</li>
+        <li><strong>Key aggregation order</strong>: Pubkey aggregation is commutative — order doesn't matter</li>
+    </ol>
+
+    <h2>❓ Why Not ECDSA?</h2>
+    <table>
+        <tr>
+            <th>Property</th>
+            <th>ECDSA (secp256k1)</th>
+            <th>BLS12-381</th>
+        </tr>
+        <tr>
+            <td>Signature size</td>
+            <td>65 bytes</td>
+            <td>96 bytes</td>
+        </tr>
+        <tr>
+            <td>Pubkey size</td>
+            <td>33 bytes</td>
+            <td>48 bytes</td>
+        </tr>
+        <tr>
+            <td><strong>Aggregation</strong></td>
+            <td>❌</td>
+            <td>✅</td>
+        </tr>
+        <tr>
+            <td>Verify speed</td>
+            <td>Faster (single)</td>
+            <td>Slower (pairings)</td>
+        </tr>
+        <tr>
+            <td><strong>N signatures</strong></td>
+            <td>65N bytes, N verifications</td>
+            <td><strong>96 bytes, 1 verification</strong></td>
+        </tr>
+    </table>
+    <p>At 400K attesters/slot, aggregation wins by orders of magnitude.</p>
+
+    <h2>🔗 Connections</h2>
+    <ul>
+        <li><strong>Lesson 3</strong> (Validator): The <code>pubkey: BLSPubkey</code> field in the Validator container</li>
+        <li><strong>Lesson 6</strong> (Domains): Deep dive into domain separation</li>
+        <li><strong>Lesson 26</strong> (Sync Committees): The 512-member committees using precomputed aggregates</li>
+        <li><strong>Lesson 31</strong> (AttestationData): What gets signed</li>
+    </ul>
+
+    <h2>📖 Further Reading</h2>
+    <ul>
+        <li><a href="https://tools.ietf.org/html/draft-irtf-cfrg-bls-signature-04">IETF BLS Signature Draft Standard v4</a></li>
+        <li><a href="https://hackmd.io/@benjaminion/bls12-381">Ben Edgington's BLS12-381 explainer</a></li>
+        <li><a href="https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#bls-signatures">Consensus Specs: BLS Signatures</a></li>
+    </ul>
+
+    <footer style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e;">
+        <p>Lesson 4 of 100 | Ethereum Consensus Specs Curriculum</p>
+        <p>Next: Lesson 5 — SSZ Serialization</p>
+    </footer>
+</body>
+</html>
