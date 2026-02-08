@@ -1,5 +1,11 @@
 [
   {
+    "file": "005-ssz-serialization.html",
+    "title": "SSZ Serialization",
+    "date": "2026-02-08",
+    "number": 5
+  },
+  {
     "file": "004-bls-signatures.html",
     "title": "BLS Signatures Deep Dive",
     "date": "2026-02-07",

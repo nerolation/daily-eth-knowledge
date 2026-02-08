@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 5: SSZ Serialization | Ethereum Consensus Specs</title>
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --fg: #e0e0e0;
+            --accent: #7b68ee;
+            --code-bg: #1a1a1a;
+            --border: #333;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.7;
+        }
+        h1 { color: var(--accent); border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; }
+        h2 { color: #9b8aff; margin-top: 2rem; }
+        h3 { color: #b8a8ff; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border-left: 3px solid var(--accent);
+        }
+        pre code { background: none; padding: 0; }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem 1rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); color: var(--accent); }
+        .spec-ref {
+            background: #1a1a2e;
+            border-left: 3px solid #4a4a8a;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .warning {
+            background: #2a1a1a;
+            border-left: 3px solid #ff6b6b;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .insight {
+            background: #1a2a1a;
+            border-left: 3px solid #6bff6b;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .meta {
+            color: #888;
+            font-size: 0.9em;
+            border-top: 1px solid var(--border);
+            margin-top: 3rem;
+            padding-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 5: SSZ Serialization</h1>
+    <p><em>Simple Serialize — encoding, merkleization, generalized indices</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Location</strong><br>
+        • <code>ssz/simple-serialize.md</code> — full SSZ spec<br>
+        • <code>ssz/merkle-proofs.md</code> — generalized indices, multiproofs<br>
+        • <code>phase0/beacon-chain.md</code> → <code>hash_tree_root</code>, <code>is_valid_merkle_branch</code>
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p>SSZ (Simple Serialize) is the canonical serialization format for all consensus layer data. Unlike RLP (used in the EL), SSZ was designed with three goals:</p>
+    <ol>
+        <li><strong>Determinism</strong> — identical objects always produce identical bytes</li>
+        <li><strong>Merkleization</strong> — every object has a unique 32-byte <code>hash_tree_root</code></li>
+        <li><strong>Proof-friendliness</strong> — any field can be proven with O(log n) hashes</li>
+    </ol>
+    
+    <div class="insight">
+        <strong>Key insight:</strong> SSZ doesn't just serialize data—it defines a <em>canonical Merkle tree structure</em> for every type. This is what enables light clients.
+    </div>
+
+    <h2>📦 Type System</h2>
+    <h3>Basic Types</h3>
+    <pre><code>uintN    — N-bit unsigned (N ∈ {8,16,32,64,128,256})
+boolean  — True/False
+byte     — 8-bit opaque data</code></pre>
+
+    <h3>Composite Types</h3>
+    <pre><code>Container    — heterogeneous struct (like BeaconState)
+Vector[T, N] — fixed-length array
+List[T, N]   — variable-length array (max N elements)
+Bitvector[N] — fixed-length bit array
+Bitlist[N]   — variable-length bit array</code></pre>
+
+    <p>Containers are the workhorses. Every major consensus structure (BeaconState, BeaconBlock, Attestation) is a Container.</p>
+
+    <h2>🛠 Serialization Rules</h2>
+    <p>The serialization algorithm distinguishes <strong>fixed-size</strong> vs <strong>variable-size</strong> types.</p>
+    <ul>
+        <li><strong>Fixed-size:</strong> uints, booleans, Vectors of fixed types, Containers with only fixed fields</li>
+        <li><strong>Variable-size:</strong> Lists, Bitlists, anything containing variable-size types</li>
+    </ul>
+
+    <p>For fixed-size types, serialization is trivial:</p>
+    <pre><code># uint64 serialization
+return value.to_bytes(8, "little")  # Always little-endian!</code></pre>
+
+    <p>For variable-size containers, SSZ uses an <strong>offset table</strong>:</p>
+    <pre><code># Serializing Container with variable fields:
+# 1. Fixed parts: either the value OR a 4-byte offset
+# 2. Variable parts: actual variable-length data
+
+fixed_parts = [serialize(x) if fixed else 4-byte-offset for x in fields]
+variable_parts = [serialize(x) for x in variable_fields]
+return concat(fixed_parts) + concat(variable_parts)</code></pre>
+
+    <p>The offset tells you where in the byte stream the variable-length data starts. This enables random access to fixed fields without parsing variable fields.</p>
+
+    <p><strong>Constants that matter:</strong></p>
+    <pre><code>BYTES_PER_CHUNK         = 32    # Merkle tree leaf size
+BYTES_PER_LENGTH_OFFSET = 4     # Max object size: 2^32 bytes</code></pre>
+
+    <h2>🌳 Merkleization (hash_tree_root)</h2>
+    <p>This is where SSZ shines. Every SSZ object has a canonical Merkle tree representation.</p>
+
+    <h3>Helper Functions</h3>
+    <pre><code>def pack(values):
+    # Serialize basic values, pad to 32-byte chunks
+    
+def merkleize(chunks, limit=None):
+    # Build binary Merkle tree from chunks
+    # If limit set, pad to next_pow_of_two(limit)
+    
+def mix_in_length(root, length):
+    # hash(root || length) — for variable-length types</code></pre>
+
+    <h3>The Rules (Simplified)</h3>
+    <pre><code>def hash_tree_root(value):
+    if is_basic(value):
+        return merkleize(pack(value))
+    
+    if is_vector_of_basic(value):
+        return merkleize(pack(value))
+    
+    if is_list_of_basic(value):
+        return mix_in_length(
+            merkleize(pack(value), limit=chunk_count(type)),
+            len(value)
+        )
+    
+    if is_container(value):
+        return merkleize([
+            hash_tree_root(field) for field in value
+        ])
+    
+    if is_list_of_composite(value):
+        return mix_in_length(
+            merkleize([hash_tree_root(x) for x in value], limit=N),
+            len(value)
+        )</code></pre>
+
+    <div class="insight">
+        <strong>Key insight:</strong> Lists mix in their length <em>after</em> merkleization. This means the tree structure is determined by the <em>capacity</em> (N), not the current length. Two lists with the same capacity but different lengths produce trees of the same depth—critical for stable generalized indices.
+    </div>
+
+    <h2>📍 Generalized Indices</h2>
+    <p>A generalized index is a way to address <em>any node</em> in an SSZ Merkle tree using a single integer.</p>
+
+    <p><strong>Definition:</strong> <code>generalized_index = 2^depth + index</code></p>
+
+    <pre><code>       1           ← root (generalized index 1)
+    2     3        ← depth 1
+   4 5   6 7       ← depth 2
+  ...</code></pre>
+
+    <h3>Properties</h3>
+    <ul>
+        <li>Root is always <code>1</code></li>
+        <li>Left child of node <code>k</code> is <code>2k</code></li>
+        <li>Right child of node <code>k</code> is <code>2k + 1</code></li>
+        <li>Parent of node <code>k</code> is <code>k // 2</code></li>
+        <li>Sibling of node <code>k</code> is <code>k ^ 1</code> (XOR with 1)</li>
+    </ul>
+
+    <h3>Computing the Generalized Index for a Path</h3>
+    <pre><code>def get_generalized_index(typ, *path):
+    # path like [7, "foo", 3] for x[7].foo[3]
+    root = 1
+    for p in path:
+        if p == "__len__":
+            # Length is right child of list root
+            root = root * 2 + 1
+        else:
+            pos = get_item_position(typ, p)
+            base = 2 if is_list(typ) else 1  # Lists have data on left
+            root = root * base * next_pow_of_two(chunk_count(typ)) + pos
+            typ = get_elem_type(typ, p)
+    return root</code></pre>
+
+    <p><strong>Why this matters:</strong> You can now refer to "slot 4 of the state's block_roots" as a single integer that's stable across all states of the same type.</p>
+
+    <h2>🔐 Merkle Proofs</h2>
+    <p>From <code>phase0/beacon-chain.md</code>:</p>
+    <pre><code>def is_valid_merkle_branch(
+    leaf: Bytes32,
+    branch: Sequence[Bytes32],
+    depth: uint64,
+    index: uint64,
+    root: Root
+) -> bool:
+    value = leaf
+    for i in range(depth):
+        if index // (2**i) % 2:
+            # We're on the right → sibling on left
+            value = hash(branch[i] + value)
+        else:
+            # We're on the left → sibling on right
+            value = hash(value + branch[i])
+    return value == root</code></pre>
+
+    <p>The <code>index</code> here uses the simpler "index at depth" convention (not generalized index), but the principle is the same: walk up the tree, hashing with siblings.</p>
+
+    <h3>Multiproofs</h3>
+    <p>More efficient when proving multiple leaves. From <code>merkle-proofs.md</code>:</p>
+    <pre><code>def get_helper_indices(indices):
+    """
+    Get the minimal set of auxiliary nodes needed 
+    to prove multiple generalized indices.
+    """
+    all_helper = set()
+    all_path = set()
+    for idx in indices:
+        all_helper |= set(get_branch_indices(idx))
+        all_path |= set(get_path_indices(idx))
+    return sorted(all_helper - all_path, reverse=True)</code></pre>
+
+    <p>A multiproof for k leaves at the same depth needs only ~k * log(n/k) auxiliary nodes, not k * log(n).</p>
+
+    <h2>❓ Why SSZ Over RLP?</h2>
+    <table>
+        <tr><th>Property</th><th>RLP</th><th>SSZ</th></tr>
+        <tr><td>Merkle-native</td><td>No</td><td>Yes</td></tr>
+        <tr><td>Fixed offsets</td><td>No</td><td>Yes (for fixed types)</td></tr>
+        <tr><td>Light client proofs</td><td>Expensive</td><td>Native</td></tr>
+        <tr><td>Canonical hash</td><td>External</td><td><code>hash_tree_root</code> built-in</td></tr>
+        <tr><td>Type awareness</td><td>Untyped</td><td>Strongly typed</td></tr>
+    </table>
+
+    <p>RLP is fine for serialization, but it's opaque to Merkle operations. To prove a field in an RLP structure, you'd need custom logic per type. With SSZ, the proof format is universal.</p>
+
+    <h2>⚠️ Gotchas</h2>
+    <div class="warning">
+        <ol>
+            <li><strong>Little-endian everywhere.</strong> All integers are serialized little-endian. If you're used to big-endian EL conventions, this will bite you.</li>
+            <li><strong>Capacity ≠ length.</strong> A <code>List[uint64, 1000]</code> with 5 elements still has a Merkle tree sized for 1000 elements (padded with zeros). The actual length is mixed in separately.</li>
+            <li><strong>Container ordering matters.</strong> The Merkle tree structure depends on field order. Reordering fields changes the <code>hash_tree_root</code>.</li>
+            <li><strong>Bitvector vs List[boolean].</strong> Both are valid but serialize differently. Bitvector is packed (8 bits per byte). List[boolean] uses 1 byte per bool. Prefer Bitvector/Bitlist.</li>
+            <li><strong>Zero vs empty.</strong> <code>is_zero(x)</code> checks if x equals its type's default value. An empty list is zero. A list with one zero element is not.</li>
+        </ol>
+    </div>
+
+    <h2>🔗 Connections</h2>
+    <ul>
+        <li><strong>Deposits (Lesson 13):</strong> Deposit proofs use <code>is_valid_merkle_branch</code> against the EL deposit contract's Merkle root</li>
+        <li><strong>Light Clients (Module 10):</strong> Sync committee updates prove finalized_header against state root using SSZ proofs</li>
+        <li><strong>State Root:</strong> Every BeaconState has a 32-byte <code>hash_tree_root</code>—this is what gets signed in attestations</li>
+    </ul>
+
+    <h2>📖 Further Reading</h2>
+    <ul>
+        <li>Full SSZ spec: <code>consensus-specs/ssz/simple-serialize.md</code></li>
+        <li>Merkle proofs spec: <code>consensus-specs/ssz/merkle-proofs.md</code></li>
+        <li>SSZ implementations: <a href="https://github.com/ethereum/consensus-specs/issues/2138">github.com/ethereum/consensus-specs/issues/2138</a></li>
+    </ul>
+
+    <h2>🧠 Summary</h2>
+    <p>SSZ is more than a serialization format—it's a <em>canonical Merkle structure</em> for every consensus type. This enables:</p>
+    <ol>
+        <li><strong>Deterministic hashing</strong> — same object, same root, every client</li>
+        <li><strong>Light client proofs</strong> — prove any field with ~32 * log₂(n) bytes</li>
+        <li><strong>Generalized indices</strong> — address any tree node with one integer</li>
+        <li><strong>Efficient multiproofs</strong> — prove k fields cheaper than k separate proofs</li>
+    </ol>
+
+    <p><strong>Tomorrow:</strong> Domains and Signing — why every signature includes domain separation and how fork versioning prevents replay attacks.</p>
+
+    <div class="meta">
+        <p>Lesson 5 of 100 | Ethereum Consensus Specs Curriculum<br>
+        Generated: 2026-02-08</p>
+    </div>
+</body>
+</html>
