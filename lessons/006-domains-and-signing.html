@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 6: Domains and Signing | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into domain separation in Ethereum consensus - how signatures are bound to purpose, fork, and chain to prevent replay attacks.">
+    <link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+    <article class="lesson">
+        <header>
+            <span class="lesson-number">Lesson 6</span>
+            <h1>Domains and Signing</h1>
+            <p class="subtitle">Cryptographic binding of signatures to purpose, fork, and chain</p>
+            <div class="meta">
+                <span class="date">February 9, 2026</span>
+                <span class="spec-ref">phase0/beacon-chain.md</span>
+            </div>
+        </header>
+
+        <section class="intro">
+            <p>Every BLS signature in Ethereum consensus includes a <strong>domain</strong>—a 32-byte value that cryptographically binds the signature to its purpose, fork, and chain. Without this, a signature for one purpose could be replayed for another.</p>
+        </section>
+
+        <section>
+            <h2>The Problem Domain Separation Solves</h2>
+            <p>Consider: an attestation signature and a block proposal signature are both just BLS signatures over some SSZ root. What stops you from taking a valid attestation signature and presenting it as a block signature?</p>
+            <p>Nothing—unless the <em>thing being signed</em> includes context about <em>what kind of signature</em> it is.</p>
+            <p>This is domain separation. Every signature covers:</p>
+            <ol>
+                <li><strong>What type</strong> of message (proposer, attester, RANDAO, etc.)</li>
+                <li><strong>What fork version</strong> the signer was on</li>
+                <li><strong>What chain</strong> (via genesis validators root)</li>
+            </ol>
+        </section>
+
+        <section>
+            <h2>Domain Types (Bytes4)</h2>
+            <pre><code class="language-python">DOMAIN_BEACON_PROPOSER     = DomainType('0x00000000')
+DOMAIN_BEACON_ATTESTER     = DomainType('0x01000000')
+DOMAIN_RANDAO              = DomainType('0x02000000')
+DOMAIN_DEPOSIT             = DomainType('0x03000000')
+DOMAIN_VOLUNTARY_EXIT      = DomainType('0x04000000')
+DOMAIN_SELECTION_PROOF     = DomainType('0x05000000')
+DOMAIN_AGGREGATE_AND_PROOF = DomainType('0x06000000')
+# Altair adds:
+DOMAIN_SYNC_COMMITTEE      = DomainType('0x07000000')</code></pre>
+            <p>Each operation type gets a unique 4-byte prefix. This alone prevents cross-purpose replay—an attestation signature can never verify as a proposer signature.</p>
+        </section>
+
+        <section>
+            <h2>The Core Functions</h2>
+            
+            <h3>1. ForkData Container</h3>
+            <pre><code class="language-python">class ForkData(Container):
+    current_version: Version    # 4 bytes
+    genesis_validators_root: Root  # 32 bytes</code></pre>
+            <p>This binds signatures to a specific chain. Same fork version on two chains with different genesis? Different domains.</p>
+
+            <h3>2. compute_fork_data_root</h3>
+            <pre><code class="language-python">def compute_fork_data_root(current_version, genesis_validators_root):
+    return hash_tree_root(ForkData(
+        current_version=current_version,
+        genesis_validators_root=genesis_validators_root,
+    ))</code></pre>
+
+            <h3>3. compute_domain (the core function)</h3>
+            <pre><code class="language-python">def compute_domain(
+    domain_type: DomainType,
+    fork_version: Optional[Version] = None,
+    genesis_validators_root: Optional[Root] = None,
+) -> Domain:
+    if fork_version is None:
+        fork_version = GENESIS_FORK_VERSION
+    if genesis_validators_root is None:
+        genesis_validators_root = Root()  # all zeros
+    
+    fork_data_root = compute_fork_data_root(
+        fork_version, genesis_validators_root
+    )
+    return Domain(domain_type + fork_data_root[:28])</code></pre>
+            <p>The 32-byte domain = 4-byte type + first 28 bytes of fork data root.</p>
+
+            <h3>4. compute_signing_root</h3>
+            <pre><code class="language-python">def compute_signing_root(ssz_object, domain):
+    return hash_tree_root(SigningData(
+        object_root=hash_tree_root(ssz_object),
+        domain=domain,
+    ))</code></pre>
+            <p>This is what actually gets signed. The message root + domain become a single signing root.</p>
+
+            <h3>5. get_domain (state-aware helper)</h3>
+            <pre><code class="language-python">def get_domain(state, domain_type, epoch=None):
+    epoch = get_current_epoch(state) if epoch is None else epoch
+    
+    # Pick correct fork version for the epoch
+    fork_version = (
+        state.fork.previous_version 
+        if epoch < state.fork.epoch 
+        else state.fork.current_version
+    )
+    return compute_domain(
+        domain_type, fork_version, state.genesis_validators_root
+    )</code></pre>
+            <p><strong>Key insight:</strong> <code>get_domain</code> looks up the fork version for a <em>specific epoch</em>. This allows validating signatures from before a fork—you need the fork version that was active when the signature was made.</p>
+        </section>
+
+        <section>
+            <h2>Example: Attestation Verification</h2>
+            <p>From <code>is_valid_indexed_attestation</code>:</p>
+            <pre><code class="language-python">domain = get_domain(
+    state, 
+    DOMAIN_BEACON_ATTESTER, 
+    indexed_attestation.data.target.epoch  # ← epoch matters!
+)
+signing_root = compute_signing_root(indexed_attestation.data, domain)
+return bls.FastAggregateVerify(pubkeys, signing_root, signature)</code></pre>
+            <p>The attestation's target epoch determines which fork version to use. An attestation for epoch 100 uses the fork version active at epoch 100, even if we're now at epoch 200 with a different fork.</p>
+        </section>
+
+        <section>
+            <h2>The DOMAIN_DEPOSIT Exception</h2>
+            <p>Deposits are special. From <code>process_deposit</code>:</p>
+            <pre><code class="language-python">domain = compute_domain(DOMAIN_DEPOSIT)  # No state!
+signing_root = compute_signing_root(deposit_message, domain)</code></pre>
+            <p>No <code>genesis_validators_root</code>, no fork version from state. Why?</p>
+            <p>Deposits are signed <em>before</em> the chain exists. When you generate a deposit on the EL, there's no beacon chain to query. The domain uses:</p>
+            <ul>
+                <li><code>GENESIS_FORK_VERSION</code> (hardcoded)</li>
+                <li>Zero genesis root (32 null bytes)</li>
+            </ul>
+            <p>This means deposit signatures are portable across testnets with the same fork version, but that's acceptable—a deposit is just "I want to stake," not a consensus-critical vote.</p>
+        </section>
+
+        <section>
+            <h2>Why This Design?</h2>
+            <dl>
+                <dt>Cross-fork safety</dt>
+                <dd>A Bellatrix attestation can't verify under Capella's domain. Hard forks invalidate old signatures for new-fork purposes.</dd>
+                
+                <dt>Cross-chain safety</dt>
+                <dd>Mainnet signatures don't work on Holesky—different <code>genesis_validators_root</code>.</dd>
+                
+                <dt>Cross-purpose safety</dt>
+                <dd>RANDAO reveals can't become block signatures—different <code>domain_type</code>.</dd>
+                
+                <dt>Epoch-specific verification</dt>
+                <dd>The epoch parameter in <code>get_domain</code> allows verifying historical signatures correctly, which is essential for slashing evidence that references past epochs.</dd>
+            </dl>
+        </section>
+
+        <section class="gotchas">
+            <h2>⚠️ Gotchas</h2>
+            <ol>
+                <li><strong>Domain ≠ DomainType.</strong> <code>DomainType</code> is 4 bytes (the purpose). <code>Domain</code> is 32 bytes (type + fork context). Don't confuse them.</li>
+                <li><strong>DOMAIN_APPLICATION_MASK.</strong> The spec reserves domain types where <code>domain_type & 0x00000001 ≠ 0</code> for application use. All protocol domains have this bit unset.</li>
+                <li><strong>Fork version timing.</strong> When verifying a signature, you need the fork version <em>at the epoch the signature was created</em>, not the current fork. Get this wrong and valid historical signatures fail verification.</li>
+                <li><strong>Genesis root is chain identity.</strong> Two chains can have identical fork versions but different genesis roots. The domain distinguishes them.</li>
+                <li><strong>28-byte truncation.</strong> The fork_data_root is 32 bytes, but only the first 28 are used in the domain (after the 4-byte type). This is fine—28 bytes of hash is still collision-resistant.</li>
+            </ol>
+        </section>
+
+        <section class="connections">
+            <h2>🔗 Connections</h2>
+            <ul>
+                <li><a href="004-bls-signatures.html">Lesson 4 (BLS)</a>: Domains are what we sign <em>over</em></li>
+                <li><a href="008-fork-container.html">Lesson 8 (Fork Container)</a>: <code>state.fork</code> provides version info</li>
+                <li><a href="017-proposer-slashing.html">Lessons 17-18 (Slashing)</a>: Slashing proofs must use correct historical domains</li>
+            </ul>
+        </section>
+
+        <section class="invariant">
+            <h2>📖 The Invariant</h2>
+            <blockquote>
+                <p>A valid BLS signature proves the signer intended to sign exactly this message, for exactly this purpose, on exactly this chain, at exactly this fork version.</p>
+            </blockquote>
+            <p>Domain separation makes this a cryptographic guarantee, not a social convention.</p>
+        </section>
+
+        <footer>
+            <p class="next-lesson">Tomorrow: Lesson 7 — Checkpoints and Finality Model</p>
+        </footer>
+    </article>
+</body>
+</html>

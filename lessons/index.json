@@ -1,5 +1,11 @@
 [
   {
+    "file": "006-domains-and-signing.html",
+    "title": "Domains and Signing",
+    "date": "2026-02-09",
+    "number": 6
+  },
+  {
     "file": "005-ssz-serialization.html",
     "title": "SSZ Serialization",
     "date": "2026-02-08",
