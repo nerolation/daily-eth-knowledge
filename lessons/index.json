@@ -1,5 +1,11 @@
 [
   {
+    "file": "007-checkpoints-and-finality-model.html",
+    "title": "Checkpoints and Finality Model",
+    "date": "2026-02-10",
+    "number": 7
+  },
+  {
     "file": "006-domains-and-signing.html",
     "title": "Domains and Signing",
     "date": "2026-02-09",

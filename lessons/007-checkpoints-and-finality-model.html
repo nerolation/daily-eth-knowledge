@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 7: Checkpoints and Finality Model | Ethereum Consensus Specs</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --border: #30363d;
+            --code-bg: #161b22;
+            --highlight: #1f6feb;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1 { color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h2 { color: var(--accent); margin-top: 2rem; }
+        h3 { color: #8b949e; }
+        code { background: var(--code-bg); padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+        pre { background: var(--code-bg); padding: 1rem; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); }
+        pre code { padding: 0; background: none; }
+        .meta { color: #8b949e; font-size: 0.9em; margin-bottom: 2rem; }
+        .section { margin: 2rem 0; padding: 1rem; background: var(--code-bg); border-radius: 8px; border-left: 3px solid var(--accent); }
+        .warning { border-left-color: #f85149; }
+        .info { border-left-color: #3fb950; }
+        a { color: var(--accent); }
+        ul, ol { padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        .emoji { font-size: 1.2em; margin-right: 0.5rem; }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 7: Checkpoints and Finality Model</h1>
+    <div class="meta">
+        <strong>Date:</strong> February 10, 2026 |
+        <strong>Module:</strong> Foundation & Primitives |
+        <strong>Spec:</strong> phase0/beacon-chain.md
+    </div>
+
+    <p>Today we build the foundation for understanding Ethereum's economic finality—the mechanism that makes transactions irreversible.</p>
+
+    <h2><span class="emoji">🔍</span>Spec Location</h2>
+    <p><code>phase0/beacon-chain.md</code> → <code>Checkpoint</code>, <code>BeaconState</code> (checkpoint fields), <code>process_justification_and_finalization</code></p>
+
+    <h2><span class="emoji">💡</span>Core Concept</h2>
+    
+    <p>A <strong>Checkpoint</strong> is the simplest container in the spec, but it anchors everything about finality:</p>
+
+    <pre><code class="language-python">class Checkpoint(Container):
+    epoch: Epoch
+    root: Root</code></pre>
+
+    <p>That's it. Two fields:</p>
+    <ul>
+        <li><code>epoch</code>: Which epoch this checkpoint refers to</li>
+        <li><code>root</code>: The block root at the <em>first slot</em> of that epoch</li>
+    </ul>
+
+    <p>Checkpoints exist only at <strong>epoch boundaries</strong>—the first slot of each epoch. This is the granularity at which finality operates. You don't finalize individual blocks; you finalize epochs.</p>
+
+    <h3>BeaconState Checkpoint Fields</h3>
+    <p>The BeaconState tracks three checkpoints:</p>
+
+    <pre><code class="language-python">previous_justified_checkpoint: Checkpoint
+current_justified_checkpoint: Checkpoint
+finalized_checkpoint: Checkpoint</code></pre>
+
+    <p>Plus a 4-bit vector:</p>
+
+    <pre><code class="language-python">justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]  # = 4</code></pre>
+
+    <p>These four bits track justification status of the last 4 epochs.</p>
+
+    <h2><span class="emoji">🛠</span>The FFG Finality Gadget</h2>
+
+    <p>Casper FFG (Friendly Finality Gadget) operates on a simple principle: validators vote on checkpoint pairs (source → target).</p>
+
+    <p>Every attestation contains:</p>
+
+    <pre><code class="language-python">class AttestationData(Container):
+    # ...
+    source: Checkpoint  # The checkpoint I'm voting from
+    target: Checkpoint  # The checkpoint I'm voting to</code></pre>
+
+    <h3>Justification</h3>
+    <p><strong>Justification</strong> happens when ≥2/3 of stake votes for a target:</p>
+
+    <pre><code class="language-python">if previous_epoch_target_balance * 3 >= total_active_balance * 2:
+    state.current_justified_checkpoint = Checkpoint(
+        epoch=previous_epoch,
+        root=get_block_root(state, previous_epoch)
+    )
+    state.justification_bits[1] = 0b1  # Mark previous epoch justified</code></pre>
+
+    <h3>Finalization</h3>
+    <p><strong>Finalization</strong> happens when justified checkpoints chain together properly. The spec checks four conditions:</p>
+
+    <pre><code class="language-python"># Condition 1: epochs n-3, n-2, n-1 all justified, n-3 finalizes
+if all(bits[1:4]) and old_previous_justified.epoch + 3 == current_epoch:
+    state.finalized_checkpoint = old_previous_justified
+
+# Condition 2: epochs n-2, n-1 justified, n-2 finalizes  
+if all(bits[1:3]) and old_previous_justified.epoch + 2 == current_epoch:
+    state.finalized_checkpoint = old_previous_justified
+
+# Condition 3: epochs n-2, n-1, n justified, n-2 finalizes
+if all(bits[0:3]) and old_current_justified.epoch + 2 == current_epoch:
+    state.finalized_checkpoint = old_current_justified
+
+# Condition 4: epochs n-1, n justified, n-1 finalizes (fastest path)
+if all(bits[0:2]) and old_current_justified.epoch + 1 == current_epoch:
+    state.finalized_checkpoint = old_current_justified</code></pre>
+
+    <p>The fastest path: justify epoch N-1, then justify epoch N → N-1 finalizes immediately.</p>
+
+    <h2><span class="emoji">❓</span>Why This Design?</h2>
+
+    <div class="section">
+        <h3>1. Why epoch-granularity, not block-granularity?</h3>
+        <p>BFT finality is expensive—it requires collecting 2/3 stake worth of signatures. Doing this every slot (12s) would be prohibitive. Epochs (32 slots, ~6.4 min) are a reasonable batch size.</p>
+    </div>
+
+    <div class="section">
+        <h3>2. Why separate justification from finalization?</h3>
+        <p>This is the key FFG insight. Justification says "≥2/3 voted for this target." But that alone doesn't guarantee safety—you need a <em>chain</em> of justified checkpoints. The two-phase model means:</p>
+        <ul>
+            <li>1 epoch to justify</li>
+            <li>1 more epoch to finalize (in the happy path)</li>
+        </ul>
+        <p>Total: ~2 epochs (~13 min) to finality under normal conditions.</p>
+    </div>
+
+    <div class="section">
+        <h3>3. Why the 4-bit justification_bits vector?</h3>
+        <p>It tracks the last 4 epochs because finalization can be delayed. If epoch N-1 wasn't justified but N-2 was, you might still finalize N-3 via condition 1 (the 3-epoch chain). The bits are shifted each epoch:</p>
+        <pre><code class="language-python">state.justification_bits[1:] = state.justification_bits[:3]
+state.justification_bits[0] = 0b0  # Reset, may be set below</code></pre>
+    </div>
+
+    <div class="section">
+        <h3>4. Why 2/3 threshold?</h3>
+        <p>With a 2/3 supermajority:</p>
+        <ul>
+            <li><strong>Safety</strong>: Two conflicting finalized checkpoints would require ≥1/3 stake to double-vote (slashable offense)</li>
+            <li><strong>Liveness</strong>: Even if 1/3 goes offline, 2/3 remains, so justification continues</li>
+        </ul>
+        <p>This is the fundamental BFT tradeoff: 2/3 for liveness, 1/3 for safety.</p>
+    </div>
+
+    <h2><span class="emoji">🔗</span>Connections</h2>
+    <ul>
+        <li><strong>Attestations (Lesson 31+)</strong>: Every attestation votes source→target, feeding justification</li>
+        <li><strong>Fork Choice (Lesson 40+)</strong>: Store tracks justified/finalized checkpoints; they constrain get_head()</li>
+        <li><strong>Slashing (Lesson 18)</strong>: Double-voting and surround-voting rules exist to prevent conflicting finalizations</li>
+        <li><strong>Inactivity Leak (Lesson 36)</strong>: When finality stalls >4 epochs, penalties activate to restore participation</li>
+    </ul>
+
+    <h2><span class="emoji">⚠️</span>Gotchas</h2>
+
+    <div class="section warning">
+        <h3>1. Genesis special case</h3>
+        <p>First two epochs skip FFG updates to avoid stub root issues:</p>
+        <pre><code class="language-python">if get_current_epoch(state) <= GENESIS_EPOCH + 1:
+    return</code></pre>
+    </div>
+
+    <div class="section warning">
+        <h3>2. Block root vs state root</h3>
+        <p>Checkpoints use <code>get_block_root(state, epoch)</code>, which returns the block root at the <em>start slot</em> of the epoch. Not the state root, not the latest block in the epoch.</p>
+    </div>
+
+    <div class="section warning">
+        <h3>3. "Old" checkpoints in finalization</h3>
+        <p>The code uses <code>old_previous_justified_checkpoint</code> and <code>old_current_justified_checkpoint</code>—values from <em>before</em> this epoch's justification updates. This prevents circular logic.</p>
+    </div>
+
+    <div class="section warning">
+        <h3>4. Finality can stall</h3>
+        <p>If &lt;2/3 participate, no justification, no finalization. The chain continues, blocks are produced, but nothing finalizes until participation recovers.</p>
+    </div>
+
+    <h2><span class="emoji">📖</span>Further Reading</h2>
+    <ul>
+        <li><a href="https://arxiv.org/abs/1710.09437">Casper FFG paper</a></li>
+        <li>Weak subjectivity spec: <code>phase0/weak-subjectivity.md</code></li>
+        <li>Fork choice: <code>phase0/fork-choice.md</code> (how checkpoints constrain head selection)</li>
+    </ul>
+
+    <hr>
+    <p><em>Tomorrow: Lesson 8 — The Fork Container and Versioning</em></p>
+
+</body>
+</html>
