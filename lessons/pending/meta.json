@@ -1,0 +1,19 @@
+{
+  "lesson": 8,
+  "title": "The Fork Container and Versioning",
+  "slug": "fork-container-versioning",
+  "date": "2026-02-11",
+  "status": "pending",
+  "files": {
+    "html": "008-fork-container-versioning.html"
+  },
+  "spec_refs": [
+    "phase0/beacon-chain.md → Fork",
+    "phase0/beacon-chain.md → ForkData",
+    "phase0/beacon-chain.md → compute_fork_data_root",
+    "phase0/beacon-chain.md → compute_domain",
+    "phase0/beacon-chain.md → get_domain",
+    "phase0/p2p-interface.md → compute_fork_digest",
+    "altair/fork.md → upgrade_to_altair"
+  ]
+}

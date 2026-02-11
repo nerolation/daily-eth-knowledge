@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 8: The Fork Container and Versioning</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+        code {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+        }
+        .section { margin: 2rem 0; }
+        .highlight { color: #f0883e; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .gotcha {
+            background: #2d1b1b;
+            border-left: 3px solid #f85149;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 8: The Fork Container and Versioning</h1>
+    <p><em>How Ethereum upgrades without coordinated restarts</em></p>
+
+    <div class="section">
+        <h2>🔍 Spec Location</h2>
+        <p><code>phase0/beacon-chain.md</code> → Fork, ForkData, compute_domain, get_domain</p>
+    </div>
+
+    <div class="section">
+        <h2>💡 Core Concept</h2>
+        <p>Every blockchain faces the upgrade problem: how do you change protocol rules without breaking consensus or requiring all nodes to restart at exactly the same moment?</p>
+        <p>Ethereum's solution: <strong>fork versions</strong> embedded in signature domains. The <code>Fork</code> container tracks which fork version applies at which epoch, and every signed message includes the appropriate fork version in its domain—making signatures from different forks cryptographically incompatible.</p>
+    </div>
+
+    <div class="section">
+        <h2>🛠 The Containers</h2>
+        <pre><code class="language-python">class Fork(Container):
+    previous_version: Version  # Bytes4
+    current_version: Version   # Bytes4
+    epoch: Epoch               # When current_version became active</code></pre>
+
+        <pre><code class="language-python">class ForkData(Container):
+    current_version: Version
+    genesis_validators_root: Root</code></pre>
+
+        <p>The <code>Fork</code> container lives in <code>BeaconState.fork</code> (field 4). It's updated at every hard fork epoch via the <code>upgrade_to_*</code> functions.</p>
+    </div>
+
+    <div class="section">
+        <h2>🔐 The Domain Mechanics</h2>
+        <p>Fork versions flow into every signature through the domain system:</p>
+
+        <pre><code class="language-python">def compute_fork_data_root(
+    current_version: Version, 
+    genesis_validators_root: Root
+) -> Root:
+    """
+    Return the 32-byte fork data root.
+    Used in signature domains to avoid collisions 
+    across forks/chains.
+    """
+    return hash_tree_root(ForkData(
+        current_version=current_version,
+        genesis_validators_root=genesis_validators_root,
+    ))</code></pre>
+
+        <pre><code class="language-python">def compute_domain(
+    domain_type: DomainType,
+    fork_version: Version = None,
+    genesis_validators_root: Root = None,
+) -> Domain:
+    if fork_version is None:
+        fork_version = GENESIS_FORK_VERSION
+    if genesis_validators_root is None:
+        genesis_validators_root = Root()
+    
+    fork_data_root = compute_fork_data_root(
+        fork_version, genesis_validators_root
+    )
+    # Domain = 4 bytes type + 28 bytes of fork_data_root
+    return Domain(domain_type + fork_data_root[:28])</code></pre>
+
+        <p>The resulting 32-byte <code>Domain</code> is mixed into every signing root. This means:</p>
+        <ul>
+            <li>Same message + different fork version = different signature</li>
+            <li>Valid signatures on one fork don't replay on another</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>🧠 The Critical Insight: get_domain</h2>
+        <p>Here's where it gets clever. When processing attestations or exits, you need signatures that were created <em>before</em> the fork to still validate <em>after</em> it:</p>
+
+        <pre><code class="language-python">def get_domain(
+    state: BeaconState, 
+    domain_type: DomainType, 
+    epoch: Epoch = None
+) -> Domain:
+    epoch = get_current_epoch(state) if epoch is None else epoch
+    
+    # KEY: use old fork version for old epochs
+    fork_version = (
+        state.fork.previous_version 
+        if epoch < state.fork.epoch 
+        else state.fork.current_version
+    )
+    
+    return compute_domain(
+        domain_type, 
+        fork_version, 
+        state.genesis_validators_root
+    )</code></pre>
+
+        <p><strong>Why this matters</strong>: An attestation targeting epoch N-1 (before the fork) gets validated using <code>previous_version</code>, even if we're now at epoch N+5 (after the fork). Without this, all pending attestations would become invalid at fork boundaries.</p>
+
+        <p>Example: Processing a voluntary exit signed at epoch 74230 while we're at epoch 74250 (after Altair at 74240). The exit signature used <code>0x00000000</code>, so we verify it with <code>previous_version</code>.</p>
+    </div>
+
+    <div class="section">
+        <h2>🌐 P2P Layer: ForkDigest</h2>
+        <p>The networking layer uses a compressed 4-byte version for topic names:</p>
+
+        <pre><code class="language-python">def compute_fork_digest(
+    genesis_validators_root: Root,
+    epoch: Epoch,
+) -> ForkDigest:
+    """
+    4-byte digest for domain separation on p2p layer.
+    """
+    fork_version = compute_fork_version(epoch)
+    base_digest = compute_fork_data_root(
+        fork_version, genesis_validators_root
+    )
+    return ForkDigest(base_digest[:4])</code></pre>
+
+        <p>GossipSub topics have form: <code>/eth2/{ForkDigest}/beacon_block/ssz_snappy</code></p>
+        <p>This automatically partitions the network at forks—nodes on different forks subscribe to different topics.</p>
+    </div>
+
+    <div class="section">
+        <h2>📋 Mainnet Fork Versions</h2>
+        <table>
+            <tr><th>Fork</th><th>Version</th><th>Epoch</th><th>Date</th></tr>
+            <tr><td>Genesis</td><td><code>0x00000000</code></td><td>0</td><td>Dec 2020</td></tr>
+            <tr><td>Altair</td><td><code>0x01000000</code></td><td>74240</td><td>Oct 2021</td></tr>
+            <tr><td>Bellatrix</td><td><code>0x02000000</code></td><td>144896</td><td>Sep 2022</td></tr>
+            <tr><td>Capella</td><td><code>0x03000000</code></td><td>194048</td><td>Apr 2023</td></tr>
+            <tr><td>Deneb</td><td><code>0x04000000</code></td><td>269568</td><td>Mar 2024</td></tr>
+            <tr><td>Electra</td><td><code>0x05000000</code></td><td>364032</td><td>May 2025</td></tr>
+            <tr><td>Fulu</td><td><code>0x06000000</code></td><td>411392</td><td>Dec 2025</td></tr>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>⚙️ Fork Upgrade Mechanics</h2>
+        <p>Each fork has an <code>upgrade_to_{fork}</code> function that atomically migrates state at the fork epoch boundary:</p>
+
+        <pre><code class="language-python">def upgrade_to_altair(pre: phase0.BeaconState) -> BeaconState:
+    epoch = phase0.get_current_epoch(pre)
+    post = BeaconState(
+        # ... copy most fields ...
+        fork=Fork(
+            previous_version=pre.fork.current_version,
+            current_version=ALTAIR_FORK_VERSION,
+            epoch=epoch,
+        ),
+        # ... initialize new fields ...
+    )
+    return post</code></pre>
+
+        <p>Pattern: <code>previous_version</code> ← old <code>current_version</code>, <code>current_version</code> ← new fork version, <code>epoch</code> ← current epoch.</p>
+    </div>
+
+    <div class="section">
+        <h2>⚠️ Gotchas</h2>
+        <div class="gotcha">
+            <p><strong>1. Deposit domain exception</strong>: <code>DOMAIN_DEPOSIT</code> uses genesis fork version always (no state available when signing)</p>
+        </div>
+        <div class="gotcha">
+            <p><strong>2. genesis_validators_root</strong>: Unique per chain—prevents cross-chain replay even with same fork versions</p>
+        </div>
+        <div class="gotcha">
+            <p><strong>3. Timing</strong>: Upgrade happens inside <code>process_slots</code> at first slot of fork epoch, <em>after</em> slot processing, <em>before</em> block processing</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🔗 Connections</h2>
+        <ul>
+            <li><strong>Lesson 6 (Domains)</strong>: Fork versions are how domains achieve cross-fork separation</li>
+            <li><strong>Lesson 7 (Checkpoints)</strong>: Attestation targets span fork boundaries—<code>get_domain</code> handles this</li>
+            <li><strong>Future</strong>: Fork choice uses fork versions for optimistic sync coordination</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>📖 Key Takeaway</h2>
+        <p>Fork versioning is Ethereum's answer to the blockchain upgrade problem. By embedding fork versions in signature domains and using epoch-aware lookups, the protocol can upgrade without coordination while maintaining signature validity across boundaries. The <code>Fork</code> container's simple three-field design—<code>previous_version</code>, <code>current_version</code>, <code>epoch</code>—enables clean transitions that preserve in-flight messages.</p>
+    </div>
+</body>
+</html>
