@@ -1,5 +1,11 @@
 [
   {
+    "file": "008-fork-container-versioning.html",
+    "title": "The Fork Container and Versioning",
+    "date": "2026-02-11",
+    "number": 8
+  },
+  {
     "file": "007-checkpoints-and-finality-model.html",
     "title": "Checkpoints and Finality Model",
     "date": "2026-02-10",
