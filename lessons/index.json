@@ -1,5 +1,11 @@
 [
   {
+    "file": "009-merkle-proofs-in-consensus.html",
+    "title": "Merkle Proofs in Consensus",
+    "date": "2026-02-12",
+    "number": 9
+  },
+  {
     "file": "008-fork-container-versioning.html",
     "title": "The Fork Container and Versioning",
     "date": "2026-02-11",

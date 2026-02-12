@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 9: Merkle Proofs in Consensus | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into is_valid_merkle_branch, generalized indices, and deposit proofs in Ethereum consensus specs.">
+    <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+    <article class="lesson">
+        <header>
+            <span class="lesson-number">Lesson 9</span>
+            <h1>Merkle Proofs in Consensus</h1>
+            <p class="lesson-date">February 12, 2026</p>
+        </header>
+
+        <section class="spec-refs">
+            <h2>📍 Spec Locations</h2>
+            <ul>
+                <li><code>phase0/beacon-chain.md</code> → <code>is_valid_merkle_branch</code></li>
+                <li><code>ssz/merkle-proofs.md</code> → Generalized indices</li>
+                <li><code>phase0/deposit-contract.md</code> → Deposit tree</li>
+            </ul>
+        </section>
+
+        <section class="core-concept">
+            <h2>💡 Core Concept</h2>
+            <p>Merkle proofs let you verify that a piece of data belongs to a larger dataset without needing the whole dataset. In Ethereum consensus, this enables:</p>
+            <ol>
+                <li><strong>Deposit verification</strong> - CL verifies deposits from EL without storing the full deposit history</li>
+                <li><strong>Light client proofs</strong> - Verify state fragments with minimal data</li>
+                <li><strong>Historical access</strong> - Prove things about past states</li>
+            </ol>
+            <p>The key insight: a Merkle proof is a <strong>path</strong> from leaf to root. If you hash up the path correctly and arrive at the known root, the leaf is authentic.</p>
+        </section>
+
+        <section class="code-section">
+            <h2>🛠 The Core Function</h2>
+            <pre><code class="language-python">def is_valid_merkle_branch(
+    leaf: Bytes32,
+    branch: Sequence[Bytes32],
+    depth: uint64,
+    index: uint64,
+    root: Root
+) -> bool:
+    """
+    Check if leaf at index verifies against
+    the Merkle root and branch.
+    """
+    value = leaf
+    for i in range(depth):
+        if index // (2**i) % 2:
+            value = hash(branch[i] + value)
+        else:
+            value = hash(value + branch[i])
+    return value == root</code></pre>
+            
+            <h3>What's happening here:</h3>
+            <p>The <code>index</code> tells you the leaf's position in the bottom layer. The binary representation of that index encodes the path:</p>
+            <ul>
+                <li>Bit = 0 → current value goes LEFT (hash current + sibling)</li>
+                <li>Bit = 1 → current value goes RIGHT (hash sibling + current)</li>
+            </ul>
+            <p>Each level, you hash your running value with the sibling from <code>branch</code>, moving up until you reach the root.</p>
+        </section>
+
+        <section class="generalized-indices">
+            <h2>🔢 Generalized Indices</h2>
+            <p>A generalized index is a clever addressing scheme for binary trees:</p>
+            <pre><code>       1          ← root
+     /   \
+    2     3       ← depth 1
+   / \   / \
+  4   5 6   7     ← depth 2
+ ...</code></pre>
+            
+            <p><strong>Formula:</strong> <code>generalized_index = 2^depth + position</code></p>
+            
+            <h3>The brilliance:</h3>
+            <ul>
+                <li>Node <code>k</code>'s children are <code>2k</code> (left) and <code>2k+1</code> (right)</li>
+                <li>Node <code>k</code>'s parent is <code>k // 2</code></li>
+                <li>Node <code>k</code>'s sibling is <code>k ^ 1</code> (XOR with 1)</li>
+                <li>Depth = <code>floor(log2(index))</code></li>
+                <li>Path from root encoded in bits: 0=left, 1=right</li>
+            </ul>
+            
+            <h3>Example: Index 5</h3>
+            <p>Index 5 = binary <code>101</code></p>
+            <ul>
+                <li>Start at root (1)</li>
+                <li>Bit after leading 1: <code>0</code> → go left</li>
+                <li>Next bit: <code>1</code> → go right</li>
+                <li>Arrives at position 5</li>
+            </ul>
+            <p>This is why SSZ uses generalized indices for proofs - the address contains the navigation instructions!</p>
+        </section>
+
+        <section class="deposit-proofs">
+            <h2>📦 Deposit Proofs in Practice</h2>
+            <p>The deposit contract maintains a Merkle tree of all deposits. When processing deposits on the CL:</p>
+            
+            <pre><code class="language-python">def process_deposit(state: BeaconState, deposit: Deposit):
+    # Verify the Merkle branch
+    assert is_valid_merkle_branch(
+        leaf=hash_tree_root(deposit.data),
+        branch=deposit.proof,
+        # Add 1 for the List length mix-in
+        depth=DEPOSIT_CONTRACT_TREE_DEPTH + 1,
+        index=state.eth1_deposit_index,
+        root=state.eth1_data.deposit_root,
+    )
+
+    # Deposits must be processed in order
+    state.eth1_deposit_index += 1
+
+    apply_deposit(state, ...)</code></pre>
+
+            <h3>Critical details:</h3>
+            <ol>
+                <li><strong>DEPOSIT_CONTRACT_TREE_DEPTH = 32</strong> - The deposit tree supports up to 2^32 (~4 billion) deposits</li>
+                <li><strong>Why depth + 1?</strong> SSZ Lists include a "mix-in" hash at the top level that commits to the list length:
+                    <pre><code>      root
+     /    \
+  data    length
+  root    hash
+   |
+  ...</code></pre>
+                </li>
+                <li><strong>Sequential processing</strong> - <code>eth1_deposit_index</code> ensures deposits are processed in order. You can't skip or reorder.</li>
+                <li><strong>The proof vector:</strong>
+                    <pre><code class="language-python">class Deposit(Container):
+    proof: Vector[Bytes32, DEPOSIT_CONTRACT_TREE_DEPTH + 1]
+    data: DepositData</code></pre>
+                    33 hashes - one for each level of the tree.
+                </li>
+            </ol>
+        </section>
+
+        <section class="design-rationale">
+            <h2>❓ Why This Design?</h2>
+            <dl>
+                <dt>Trustless bridging</dt>
+                <dd>The CL doesn't trust the EL. It only trusts <code>eth1_data.deposit_root</code> which was voted in by validators. Given that root, any deposit claim must prove membership.</dd>
+                
+                <dt>No full sync needed</dt>
+                <dd>A beacon node doesn't need the complete deposit history - just the current root and individual proofs.</dd>
+                
+                <dt>Incremental tree</dt>
+                <dd>The deposit contract uses a "progressive Merkle root" algorithm - it can add new deposits and update the root without recomputing the entire tree.</dd>
+            </dl>
+        </section>
+
+        <section class="connections">
+            <h2>🔗 Connections</h2>
+            <ul>
+                <li><strong>SSZ hash_tree_root</strong> (Lesson 5) - Merkle proofs verify against roots computed by SSZ merkleization</li>
+                <li><strong>Light clients</strong> (Module 10) - Use generalized index proofs to verify sync committee signatures, finalized headers</li>
+                <li><strong>Historical access</strong> - <code>historical_summaries</code> enable proofs about old blocks/states</li>
+                <li><strong>Data availability</strong> - Blob KZG commitments are proven into the beacon block via Merkle proofs</li>
+            </ul>
+        </section>
+
+        <section class="gotchas">
+            <h2>⚠️ Gotchas</h2>
+            <ol>
+                <li><strong>Index encoding matters</strong> - The <code>index // (2**i) % 2</code> expression extracts bit <code>i</code>. If you get the bit order wrong, the hash order flips and proof fails.</li>
+                <li><strong>Depth off-by-one</strong> - SSZ Lists need <code>depth + 1</code> for the length mix-in. Vectors don't. Common source of bugs.</li>
+                <li><strong>Proof direction</strong> - Proofs go leaf→root (bottom-up), not root→leaf. The branch contains siblings at each level, starting from the bottom.</li>
+                <li><strong>Empty tree handling</strong> - An empty list still has a length mix-in hash. The "data root" side is <code>ZERO_HASH</code>.</li>
+            </ol>
+        </section>
+
+        <section class="further-reading">
+            <h2>📖 Further Reading</h2>
+            <ul>
+                <li><a href="https://github.com/ethereum/consensus-specs/blob/dev/ssz/merkle-proofs.md">SSZ merkle-proofs.md</a> - Full generalized index spec with multiproofs</li>
+                <li><a href="https://eips.ethereum.org/EIPS/eip-4788">EIP-4788</a> - Beacon root in EVM, enabling EL→CL proofs</li>
+                <li>Deposit contract source: <code>solidity_deposit_contract/deposit_contract.sol</code></li>
+            </ul>
+        </section>
+
+        <footer>
+            <p class="next-lesson">Tomorrow: Lesson 10 - RANDAO and how the chain accumulates randomness.</p>
+        </footer>
+    </article>
+</body>
+</html>
