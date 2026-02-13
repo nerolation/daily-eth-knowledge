@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 10: RANDAO — Randomness Accumulation</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        code {
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.5rem;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .meta {
+            color: #8b949e;
+            font-size: 0.9em;
+            margin-bottom: 2rem;
+        }
+        .callout {
+            background: var(--code-bg);
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>⚙️ Lesson 10: RANDAO — Randomness Accumulation</h1>
+    
+    <div class="meta">
+        <strong>📚 Topic:</strong> How randomness is accumulated, why XOR, the 1-bit bias attack<br>
+        <strong>🔍 Spec:</strong> <code>phase0/beacon-chain.md</code> → <code>get_randao_mix</code>, <code>process_randao</code>, <code>get_seed</code><br>
+        <strong>📅 Date:</strong> February 13, 2026
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    
+    <p>Every consensus mechanism needs randomness for committee selection. RANDAO (Random DAO) is Ethereum's commit-reveal randomness accumulator.</p>
+    
+    <p><strong>The problem:</strong> How do you generate unpredictable randomness when every participant can see all inputs?</p>
+    
+    <p><strong>The solution:</strong> Each proposer contributes entropy by signing the current epoch number with their BLS key. These reveals are XOR'd together into a running mix that evolves every epoch.</p>
+    
+    <div class="callout">
+        <strong>Key insight:</strong> A proposer can't control their reveal (it's deterministic given their key), but they can choose <em>whether</em> to reveal it — this is the 1-bit bias attack.
+    </div>
+
+    <h2>🛠 The Code</h2>
+
+    <h3>1. State Storage</h3>
+    <pre><code># BeaconState contains a circular buffer of mixes
+randao_mixes: Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR]  # 65,536 epochs ≈ 0.8 years</code></pre>
+
+    <h3>2. Reading a Mix</h3>
+    <pre><code>def get_randao_mix(state: BeaconState, epoch: Epoch) -> Bytes32:
+    """Return the randao mix at a recent epoch."""
+    return state.randao_mixes[epoch % EPOCHS_PER_HISTORICAL_VECTOR]</code></pre>
+    <p>Simple circular buffer indexing. The mix for epoch <code>N</code> is at position <code>N mod 65536</code>.</p>
+
+    <h3>3. Processing a RANDAO Reveal</h3>
+    <pre><code>def process_randao(state: BeaconState, body: BeaconBlockBody) -> None:
+    epoch = get_current_epoch(state)
+    
+    # Verify RANDAO reveal is valid BLS signature
+    proposer = state.validators[get_beacon_proposer_index(state)]
+    signing_root = compute_signing_root(epoch, get_domain(state, DOMAIN_RANDAO))
+    assert bls.Verify(proposer.pubkey, signing_root, body.randao_reveal)
+    
+    # Mix in RANDAO reveal via XOR
+    mix = xor(get_randao_mix(state, epoch), hash(body.randao_reveal))
+    state.randao_mixes[epoch % EPOCHS_PER_HISTORICAL_VECTOR] = mix</code></pre>
+
+    <p><strong>What happens:</strong></p>
+    <ol>
+        <li>Proposer signs the epoch number with <code>DOMAIN_RANDAO</code></li>
+        <li>Signature is verified against proposer's pubkey</li>
+        <li>Reveal is hashed and XOR'd into the current mix</li>
+    </ol>
+
+    <p><strong>Why XOR?</strong></p>
+    <ul>
+        <li>Commutative: order doesn't matter</li>
+        <li>Each reveal flips ~50% of bits</li>
+        <li>N honest reveals → N bits of entropy guaranteed</li>
+        <li>No single party can predict the final value without knowing all reveals</li>
+    </ul>
+
+    <h3>4. Epoch Boundary Reset</h3>
+    <pre><code>def process_randao_mixes_reset(state: BeaconState) -> None:
+    current_epoch = get_current_epoch(state)
+    next_epoch = Epoch(current_epoch + 1)
+    # Carry forward the current mix as starting point for next epoch
+    state.randao_mixes[next_epoch % EPOCHS_PER_HISTORICAL_VECTOR] = get_randao_mix(
+        state, current_epoch
+    )</code></pre>
+    <p>Each epoch starts with the previous epoch's mix. 32 blocks per epoch = 32 reveals mixed in.</p>
+
+    <h3>5. From Mix to Seed</h3>
+    <pre><code>def get_seed(state: BeaconState, epoch: Epoch, domain_type: DomainType) -> Bytes32:
+    """Return the seed at epoch."""
+    mix = get_randao_mix(
+        state, Epoch(epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1)
+    )  # Avoid underflow
+    return hash(domain_type + uint_to_bytes(epoch) + mix)</code></pre>
+
+    <p><strong>The lookahead:</strong> <code>MIN_SEED_LOOKAHEAD = 1</code> means we use the mix from 2 epochs ago.</p>
+    <p>For epoch N's committees, we use the mix finalized at epoch N-2.</p>
+    <p><strong>Why the delay?</strong> Prevents a proposer from seeing their committee assignment <em>before</em> deciding whether to reveal. By the time you know your assignment, the RANDAO that determined it is already locked.</p>
+
+    <h2>❓ The 1-Bit Bias Attack</h2>
+    
+    <p><strong>Scenario:</strong> Last proposer of epoch N controls 1 bit of entropy.</p>
+    <ol>
+        <li>Proposer computes: "If I reveal, mix becomes X. If I skip, mix stays Y."</li>
+        <li>X might put me on a profitable committee; Y might not</li>
+        <li>Proposer can <em>choose</em> to skip their block (forfeit ~0.01 ETH rewards)</li>
+        <li>This biases the randomness by 1 bit</li>
+    </ol>
+
+    <p><strong>Mitigation via lookahead:</strong></p>
+    <table>
+        <tr>
+            <th>Constant</th>
+            <th>Value</th>
+            <th>Effect</th>
+        </tr>
+        <tr>
+            <td><code>MIN_SEED_LOOKAHEAD</code></td>
+            <td>1 epoch</td>
+            <td>Min delay before committees known</td>
+        </tr>
+        <tr>
+            <td><code>MAX_SEED_LOOKAHEAD</code></td>
+            <td>4 epochs</td>
+            <td>Max advance knowledge of duties</td>
+        </tr>
+    </table>
+    <p>Even with multiple consecutive slots, an attacker can bias at most a few bits — not enough to guarantee favorable assignments.</p>
+
+    <h2>🔗 Connections</h2>
+    
+    <p><strong>Feeds into:</strong></p>
+    <ul>
+        <li><code>compute_shuffled_index</code> — shuffles validators using seed derived from RANDAO</li>
+        <li><code>get_beacon_committee</code> — committee assignment</li>
+        <li><code>compute_proposer_index</code> — proposer selection</li>
+        <li>Sync committee selection (Altair)</li>
+    </ul>
+
+    <p><strong>Genesis initialization:</strong></p>
+    <pre><code>randao_mixes=[eth1_block_hash] * EPOCHS_PER_HISTORICAL_VECTOR</code></pre>
+    <p>The Eth1 block hash seeds initial randomness — external entropy bootstraps the system.</p>
+
+    <h2>⚠️ Gotchas</h2>
+    <ol>
+        <li><strong>Reveals are deterministic:</strong> A validator can't choose <em>what</em> to reveal, only <em>whether</em> to reveal</li>
+        <li><strong>Hash before XOR:</strong> Raw signature could leak info; hashing normalizes to uniform bits</li>
+        <li><strong>Circular buffer:</strong> Only ~0.8 years of history retained</li>
+        <li><strong>Domain separation:</strong> <code>DOMAIN_RANDAO = 0x02000000</code> prevents signature reuse</li>
+    </ol>
+
+    <h2>📖 Why Not VDF or VRF?</h2>
+    <ul>
+        <li><strong>VDF (Verifiable Delay Function):</strong> Considered for Eth2, adds ~15s delay to compute. Would eliminate bias but adds latency and hardware requirements</li>
+        <li><strong>VRF:</strong> Single-secret-leader election considered; RANDAO + threshold is simpler</li>
+    </ul>
+    <p>RANDAO is "good enough" — 1-bit bias per proposer isn't exploitable at scale.</p>
+
+    <hr>
+    <p><em>Next: Lesson 11 — Effective Balance vs Actual Balance (the hysteresis that prevents state churn)</em></p>
+</body>
+</html>

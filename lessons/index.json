@@ -1,5 +1,11 @@
 [
   {
+    "file": "010-randao-randomness-accumulation.html",
+    "title": "RANDAO — Randomness Accumulation",
+    "date": "2026-02-13",
+    "number": 10
+  },
+  {
     "file": "009-merkle-proofs-in-consensus.html",
     "title": "Merkle Proofs in Consensus",
     "date": "2026-02-12",
