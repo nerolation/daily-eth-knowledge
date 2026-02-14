@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 11: Effective Balance vs Actual Balance</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
+        h2 { color: var(--accent); margin: 2rem 0 1rem; font-size: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h3 { color: #8b949e; margin: 1.5rem 0 0.75rem; font-size: 1.1rem; }
+        .meta { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
+        p { margin-bottom: 1rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'Fira Code', Consolas, monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            border: 1px solid var(--border);
+        }
+        pre code { background: none; padding: 0; }
+        .highlight { color: #7ee787; }
+        .comment { color: #8b949e; }
+        .keyword { color: #ff7b72; }
+        .number { color: #79c0ff; }
+        ul, ol { margin: 1rem 0 1rem 2rem; }
+        li { margin-bottom: 0.5rem; }
+        .callout {
+            background: var(--code-bg);
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .warning {
+            border-left-color: #f0883e;
+        }
+        .diagram {
+            font-family: 'Fira Code', Consolas, monospace;
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+            white-space: pre;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+    </style>
+</head>
+<body>
+    <h1>⚙️ Lesson 11: Effective Balance vs Actual Balance</h1>
+    <div class="meta">Consensus Specs Curriculum · Module 1: Foundation & Primitives</div>
+
+    <h2>📚 Topic</h2>
+    <p>Why Ethereum maintains two separate balances for every validator—and the elegant hysteresis mechanism that prevents state churn.</p>
+
+    <h2>🔍 Spec Location</h2>
+    <ul>
+        <li><code>phase0/beacon-chain.md</code> → <code>Validator</code> container, <code>process_effective_balance_updates</code>, Gwei values preset</li>
+        <li><code>electra/beacon-chain.md</code> → Modified with <code>get_max_effective_balance</code></li>
+    </ul>
+
+    <h2>💡 Core Concept</h2>
+    <p>Every validator has <em>two</em> balances tracked separately:</p>
+
+    <h3>1. Actual Balance (<code>state.balances[index]</code>)</h3>
+    <ul>
+        <li>Changes every epoch from rewards/penalties</li>
+        <li>Precise down to 1 Gwei</li>
+        <li>Where your actual ETH lives</li>
+    </ul>
+
+    <h3>2. Effective Balance (<code>validator.effective_balance</code>)</h3>
+    <ul>
+        <li>Capped at 32 ETH (pre-Electra) or 2048 ETH (compounding validators)</li>
+        <li>Rounded to 1 ETH increments</li>
+        <li>Used for ALL protocol calculations</li>
+    </ul>
+
+    <div class="callout">
+        <strong>Why two balances?</strong> Every time effective_balance changes, it affects:
+        <ul>
+            <li>Committee shuffling (via <code>get_total_active_balance</code>)</li>
+            <li>Proposer selection probabilities</li>
+            <li>Reward/penalty calculations</li>
+            <li>Slashing amounts</li>
+            <li>Justification/finalization weights</li>
+        </ul>
+        <p>If we used actual balance directly, a 1 Gwei change would invalidate cached computations and trigger state churn. The effective balance abstraction provides <em>stability</em>.</p>
+    </div>
+
+    <h2>🛠 The Spec Code</h2>
+
+    <h3>Constants</h3>
+<pre><code><span class="comment"># Gwei values (preset)</span>
+MAX_EFFECTIVE_BALANCE = Gwei(<span class="number">2**5</span> * <span class="number">10**9</span>)  <span class="comment"># 32 ETH</span>
+EFFECTIVE_BALANCE_INCREMENT = Gwei(<span class="number">2**0</span> * <span class="number">10**9</span>)  <span class="comment"># 1 ETH</span>
+
+<span class="comment"># Hysteresis parameters</span>
+HYSTERESIS_QUOTIENT = uint64(<span class="number">4</span>)
+HYSTERESIS_DOWNWARD_MULTIPLIER = uint64(<span class="number">1</span>)  
+HYSTERESIS_UPWARD_MULTIPLIER = uint64(<span class="number">5</span>)</code></pre>
+
+    <h3>The Update Function (Phase 0)</h3>
+<pre><code><span class="keyword">def</span> <span class="highlight">process_effective_balance_updates</span>(state: BeaconState) -> None:
+    <span class="keyword">for</span> index, validator <span class="keyword">in</span> enumerate(state.validators):
+        balance = state.balances[index]
+        
+        <span class="comment"># Hysteresis thresholds</span>
+        HYSTERESIS_INCREMENT = EFFECTIVE_BALANCE_INCREMENT // HYSTERESIS_QUOTIENT  <span class="comment"># 0.25 ETH</span>
+        DOWNWARD_THRESHOLD = HYSTERESIS_INCREMENT * HYSTERESIS_DOWNWARD_MULTIPLIER  <span class="comment"># 0.25 ETH</span>
+        UPWARD_THRESHOLD = HYSTERESIS_INCREMENT * HYSTERESIS_UPWARD_MULTIPLIER     <span class="comment"># 1.25 ETH</span>
+        
+        <span class="keyword">if</span> (
+            balance + DOWNWARD_THRESHOLD < validator.effective_balance
+            <span class="keyword">or</span> validator.effective_balance + UPWARD_THRESHOLD < balance
+        ):
+            validator.effective_balance = min(
+                balance - balance % EFFECTIVE_BALANCE_INCREMENT,
+                MAX_EFFECTIVE_BALANCE
+            )</code></pre>
+
+    <p><strong>The key insight:</strong> effective_balance only updates when the actual balance crosses a threshold with <em>margin</em>. This is hysteresis—different thresholds for going up vs down.</p>
+
+    <h2>❓ Why Hysteresis?</h2>
+
+    <p>Consider a validator with:</p>
+    <ul>
+        <li><code>effective_balance = 32 ETH</code></li>
+        <li><code>actual balance = 31.9 ETH</code></li>
+    </ul>
+
+    <p>Without hysteresis, they'd drop to <code>effective_balance = 31 ETH</code>. Next epoch they earn ~0.003 ETH, now at 31.903 ETH. Still <code>effective_balance = 31 ETH</code>. They earn more, hit 32.0 ETH, jump back to <code>effective_balance = 32 ETH</code>. Then a small penalty drops them below again...</p>
+
+    <div class="callout warning">
+        <strong>The oscillation problem.</strong> Validators near integer boundaries would flip-flop constantly, causing:
+        <ul>
+            <li>Repeated state root changes</li>
+            <li>Merkle proof invalidation</li>
+            <li>Wasted computation</li>
+        </ul>
+    </div>
+
+    <h3>Hysteresis Solution</h3>
+    <ul>
+        <li><strong>To go DOWN:</strong> actual must be &lt; effective - 0.25 ETH</li>
+        <li><strong>To go UP:</strong> actual must be &gt; effective + 1.25 ETH</li>
+    </ul>
+
+    <p>Example with 32 ETH effective:</p>
+    <ul>
+        <li>Won't drop to 31 ETH until actual &lt; 31.75 ETH</li>
+        <li>Won't rise back to 32 ETH until actual &gt; 32.25 ETH</li>
+    </ul>
+
+    <p>The asymmetry (0.25 down, 1.25 up) biases toward <em>staying at the current level</em>, creating a stable band around each integer value.</p>
+
+    <div class="diagram">Balance:   30.5 ─── 31 ─── 31.5 ─── 32 ─── 32.5
+                     │            │
+            ┌───────┘            └───────┐
+      drops to 31 ETH            rises to 32 ETH
+       (if eff=32)                (if eff=31)</div>
+
+    <h2>🔗 Electra Changes (EIP-7251: MaxEB)</h2>
+
+    <p>Electra introduces <em>variable</em> max effective balance:</p>
+
+<pre><code><span class="comment"># New constants</span>
+MIN_ACTIVATION_BALANCE = Gwei(<span class="number">2**5</span> * <span class="number">10**9</span>)  <span class="comment"># 32 ETH</span>
+MAX_EFFECTIVE_BALANCE_ELECTRA = Gwei(<span class="number">2**11</span> * <span class="number">10**9</span>)  <span class="comment"># 2048 ETH</span>
+COMPOUNDING_WITHDRAWAL_PREFIX = Bytes1(<span class="highlight">'0x02'</span>)
+
+<span class="keyword">def</span> <span class="highlight">get_max_effective_balance</span>(validator: Validator) -> Gwei:
+    <span class="keyword">if</span> has_compounding_withdrawal_credential(validator):
+        <span class="keyword">return</span> MAX_EFFECTIVE_BALANCE_ELECTRA  <span class="comment"># 2048 ETH</span>
+    <span class="keyword">else</span>:
+        <span class="keyword">return</span> MIN_ACTIVATION_BALANCE  <span class="comment"># 32 ETH (legacy behavior)</span></code></pre>
+
+    <h3>Modified process_effective_balance_updates</h3>
+<pre><code><span class="comment"># [Modified in Electra:EIP7251]</span>
+max_effective_balance = get_max_effective_balance(validator)
+
+validator.effective_balance = min(
+    balance - balance % EFFECTIVE_BALANCE_INCREMENT,
+    max_effective_balance  <span class="comment"># Now per-validator!</span>
+)</code></pre>
+
+    <h3>Why This Matters</h3>
+    <ul>
+        <li>Validators with <code>0x02</code> prefix can compound rewards (no need for 32-ETH restaking dance)</li>
+        <li>Large stakers can consolidate into fewer validators</li>
+        <li>Reduces validator set size → less state, faster shuffling</li>
+        <li>Keeps 1 ETH granularity (hysteresis unchanged)</li>
+    </ul>
+
+    <h2>⚠️ Gotchas</h2>
+
+    <h3>1. Activation uses effective balance, not actual</h3>
+<pre><code><span class="comment"># Phase 0: Must hit exactly 32 ETH effective</span>
+validator.effective_balance == MAX_EFFECTIVE_BALANCE
+
+<span class="comment"># Electra: Uses MIN_ACTIVATION_BALANCE</span>
+validator.effective_balance >= MIN_ACTIVATION_BALANCE</code></pre>
+
+    <h3>2. Rewards computed from effective, credited to actual</h3>
+    <ul>
+        <li>You earn based on effective_balance</li>
+        <li>Rewards go to actual balance</li>
+        <li>Effective only catches up at epoch boundary</li>
+    </ul>
+
+    <h3>3. Rounding is floor, not round</h3>
+    <p><code>balance - balance % EFFECTIVE_BALANCE_INCREMENT</code> truncates</p>
+    <ul>
+        <li>31.999 ETH → 31 ETH effective</li>
+        <li>Combined with hysteresis, this is conservative</li>
+    </ul>
+
+    <h3>4. Ejection threshold uses effective</h3>
+<pre><code>validator.effective_balance <= EJECTION_BALANCE  <span class="comment"># 16 ETH</span></code></pre>
+    <p>You're ejected when effective drops to 16 ETH or below.</p>
+
+    <h2>📖 Design Rationale</h2>
+
+    <p>The 1 ETH granularity is a tradeoff:</p>
+    <ul>
+        <li>Finer granularity → more accurate weight → more state churn</li>
+        <li>Coarser granularity → less accurate → wrong in edge cases</li>
+    </ul>
+
+    <p>1 ETH represents ~0.00001% of total stake. Quantization error is negligible for consensus security, but state savings are substantial.</p>
+
+    <p>The asymmetric hysteresis (down=0.25, up=1.25 ETH) reflects that:</p>
+    <ul>
+        <li>Losses matter more (slashing accountability)</li>
+        <li>Gains can wait (just accumulating rewards)</li>
+    </ul>
+
+</body>
+</html>
