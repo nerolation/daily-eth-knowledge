@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 13: Deposits and the Deposit Contract</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        h1 { color: #1a1a2e; border-bottom: 3px solid #4361ee; padding-bottom: 0.5rem; }
+        h2 { color: #3a0ca3; margin-top: 2rem; }
+        h3 { color: #4361ee; }
+        code { background: #f0f0f5; padding: 0.2rem 0.4rem; border-radius: 3px; font-family: 'Fira Code', monospace; }
+        pre { background: #1a1a2e; color: #e0e0e0; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+        pre code { background: none; color: inherit; }
+        .spec-ref { background: #e8f4f8; border-left: 4px solid #4361ee; padding: 0.5rem 1rem; margin: 1rem 0; }
+        .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.5rem 1rem; margin: 1rem 0; }
+        .key-point { background: #d4edda; border-left: 4px solid #28a745; padding: 0.5rem 1rem; margin: 1rem 0; }
+        table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+        th, td { border: 1px solid #ddd; padding: 0.75rem; text-align: left; }
+        th { background: #4361ee; color: white; }
+        tr:nth-child(even) { background: #f8f9fa; }
+        .emoji { font-size: 1.2em; }
+    </style>
+</head>
+<body>
+    <h1><span class="emoji">📚</span> Lesson 13: Deposits and the Deposit Contract</h1>
+    <p><em>The bridge from execution layer to consensus — how ETH enters the validator set</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Location</strong>
+        <ul>
+            <li><code>phase0/deposit-contract.md</code> — EL deposit contract specification</li>
+            <li><code>phase0/beacon-chain.md</code> → <code>Deposit</code>, <code>DepositData</code>, <code>Eth1Data</code>, <code>process_deposit</code></li>
+            <li><code>solidity_deposit_contract/deposit_contract.sol</code> — actual contract code</li>
+        </ul>
+    </div>
+
+    <h2><span class="emoji">💡</span> Core Concept</h2>
+    <p>The deposit flow is the one-way bridge that moves ETH from the execution layer into the consensus layer validator set. It's architecturally unique: the EL contract stores a progressive Merkle tree, the CL follows that contract's state via voting, and deposits are processed in strict order.</p>
+
+    <h3>Key Components</h3>
+    <ol>
+        <li><strong>Deposit Contract</strong> (EL): Accepts ETH + credentials, maintains Merkle tree</li>
+        <li><strong>Eth1Data Voting</strong> (CL): Validators vote on which EL state to follow</li>
+        <li><strong>Deposit Processing</strong> (CL): Merkle proofs verify deposits, creates validators</li>
+    </ol>
+
+    <div class="key-point">
+        <strong>Why this design?</strong>
+        <ul>
+            <li>Pre-merge: CL couldn't directly read EL state</li>
+            <li>Post-merge: Legacy system still works, though Electra adds EL-triggered deposits</li>
+            <li>The Merkle tree enables stateless verification of deposit membership</li>
+        </ul>
+    </div>
+
+    <h2><span class="emoji">🛠</span> Data Structures</h2>
+
+    <h3>DepositData — what you submit to the contract</h3>
+    <pre><code class="python">class DepositData(Container):
+    pubkey: BLSPubkey           # 48 bytes
+    withdrawal_credentials: Bytes32
+    amount: Gwei
+    signature: BLSSignature     # proof of possession</code></pre>
+
+    <h3>Deposit — what appears in beacon blocks</h3>
+    <pre><code class="python">class Deposit(Container):
+    proof: Vector[Bytes32, 33]  # Merkle path (depth 32 + 1)
+    data: DepositData</code></pre>
+
+    <h3>Eth1Data — how CL tracks the deposit contract</h3>
+    <pre><code class="python">class Eth1Data(Container):
+    deposit_root: Root          # Merkle root of all deposits
+    deposit_count: uint64       # total deposits so far
+    block_hash: Hash32          # EL block containing this state</code></pre>
+
+    <div class="key-point">
+        <strong>Why 33 proof elements?</strong><br>
+        The Merkle tree has depth 32 (<code>DEPOSIT_CONTRACT_TREE_DEPTH</code>), but SSZ <code>List</code> types mix in their length at the root. So: 32 for the tree + 1 for the length = 33.
+    </div>
+
+    <h2><span class="emoji">📜</span> The Deposit Contract (EL Side)</h2>
+    <p>The contract at <code>0x00000000219ab540356cBB839Cbe05303d7705Fa</code> does surprisingly little validation:</p>
+
+    <pre><code class="solidity">function deposit(
+    bytes calldata pubkey,
+    bytes calldata withdrawal_credentials,
+    bytes calldata signature,
+    bytes32 deposit_data_root  // protection against malformed input
+) external payable {
+    require(msg.value >= 1 ether, "deposit value too low");
+    require(msg.value % 1 gwei == 0, "not multiple of gwei");
+    
+    // Emit log for CL to consume
+    emit DepositEvent(pubkey, withdrawal_credentials, amount, signature, index);
+    
+    // Add to progressive Merkle tree
+    deposit_count += 1;
+    // ... update branch nodes
+}</code></pre>
+
+    <h3>What the contract does NOT verify:</h3>
+    <ul>
+        <li>BLS signature validity (pushed to CL)</li>
+        <li>Withdrawal credentials format</li>
+        <li>Whether pubkey already exists</li>
+        <li>Minimum 32 ETH (only 1 ETH minimum on EL)</li>
+    </ul>
+
+    <div class="key-point">
+        <strong>Why?</strong> BLS verification in Solidity would be expensive. The CL handles verification; the contract just records the <em>commitment</em>.
+    </div>
+
+    <p><strong>Progressive Merkle Tree:</strong> Uses O(log n) storage instead of storing all deposits. Only the "branch" nodes on the path from rightmost leaf to root are stored. This is the key innovation — unlimited deposits with constant storage.</p>
+
+    <h2><span class="emoji">⚙️</span> Eth1Data Voting (CL Follows EL)</h2>
+    <p>Validators vote on which EL state to follow:</p>
+
+    <pre><code class="python">def process_eth1_data(state: BeaconState, body: BeaconBlockBody) -> None:
+    state.eth1_data_votes.append(body.eth1_data)
+    if state.eth1_data_votes.count(body.eth1_data) * 2 > EPOCHS_PER_ETH1_VOTING_PERIOD * SLOTS_PER_EPOCH:
+        state.eth1_data = body.eth1_data  # majority wins</code></pre>
+
+    <h3>The math:</h3>
+    <ul>
+        <li><code>EPOCHS_PER_ETH1_VOTING_PERIOD</code> = 64 epochs (~6.8 hours)</li>
+        <li>64 epochs × 32 slots = 2,048 votes per period</li>
+        <li>Need >1,024 votes (>50%) for the same <code>eth1_data</code> to adopt it</li>
+    </ul>
+
+    <div class="key-point">
+        <strong>Why voting?</strong><br>
+        Pre-merge, the CL couldn't trust any single EL node. Validators run their own EL clients and vote on what they see. Majority = consensus on deposit contract state.
+    </div>
+
+    <h2><span class="emoji">🔄</span> Deposit Processing (CL Side)</h2>
+
+    <pre><code class="python">def process_deposit(state: BeaconState, deposit: Deposit) -> None:
+    # 1. Verify Merkle proof
+    assert is_valid_merkle_branch(
+        leaf=hash_tree_root(deposit.data),
+        branch=deposit.proof,
+        depth=DEPOSIT_CONTRACT_TREE_DEPTH + 1,  # 33
+        index=state.eth1_deposit_index,
+        root=state.eth1_data.deposit_root,
+    )
+    
+    # 2. Deposits MUST be processed in order
+    state.eth1_deposit_index += 1
+    
+    # 3. Apply the deposit
+    apply_deposit(state, deposit.data.pubkey, ...)</code></pre>
+
+    <div class="key-point">
+        <strong>Critical invariant:</strong> Deposits are processed sequentially by <code>eth1_deposit_index</code>. You can't skip deposits or process out of order. This ensures every deposit is processed exactly once.
+    </div>
+
+    <h3>Blocks must include deposits:</h3>
+    <pre><code class="python">assert len(body.deposits) == min(
+    MAX_DEPOSITS,  # 16
+    state.eth1_data.deposit_count - state.eth1_deposit_index
+)</code></pre>
+    <p>Proposers MUST include all available deposits up to 16. No cherry-picking.</p>
+
+    <h2><span class="emoji">👤</span> Applying Deposits</h2>
+
+    <pre><code class="python">def apply_deposit(state, pubkey, withdrawal_credentials, amount, signature) -> None:
+    validator_pubkeys = [v.pubkey for v in state.validators]
+    
+    if pubkey not in validator_pubkeys:
+        # NEW VALIDATOR: verify BLS signature first
+        deposit_message = DepositMessage(pubkey, withdrawal_credentials, amount)
+        domain = compute_domain(DOMAIN_DEPOSIT)  # fork-agnostic!
+        signing_root = compute_signing_root(deposit_message, domain)
+        
+        if bls.Verify(pubkey, signing_root, signature):
+            add_validator_to_registry(state, pubkey, withdrawal_credentials, amount)
+        # Invalid signature = silently ignored (no revert)
+    else:
+        # EXISTING VALIDATOR: just add to balance
+        index = validator_pubkeys.index(pubkey)
+        increase_balance(state, index, amount)</code></pre>
+
+    <h3>Key behaviors:</h3>
+    <ol>
+        <li><strong>Fork-agnostic domain</strong>: Deposits signed before a fork remain valid after. No re-signing needed.</li>
+        <li><strong>Invalid signatures ignored</strong>: A bad deposit doesn't revert the block — it just doesn't create a validator. The ETH is still "burned" from EL perspective.</li>
+        <li><strong>Top-up deposits</strong>: Same pubkey? Just increases balance. No signature check needed (you're already a validator).</li>
+    </ol>
+
+    <h2><span class="emoji">🆕</span> New Validator Creation</h2>
+
+    <pre><code class="python">def get_validator_from_deposit(pubkey, withdrawal_credentials, amount) -> Validator:
+    effective_balance = min(
+        amount - amount % EFFECTIVE_BALANCE_INCREMENT,
+        MAX_EFFECTIVE_BALANCE  # 32 ETH
+    )
+    
+    return Validator(
+        pubkey=pubkey,
+        withdrawal_credentials=withdrawal_credentials,
+        effective_balance=effective_balance,
+        slashed=False,
+        activation_eligibility_epoch=FAR_FUTURE_EPOCH,  # not yet eligible
+        activation_epoch=FAR_FUTURE_EPOCH,              # not yet active
+        exit_epoch=FAR_FUTURE_EPOCH,
+        withdrawable_epoch=FAR_FUTURE_EPOCH,
+    )</code></pre>
+
+    <div class="key-point">
+        <strong>The validator starts with <code>FAR_FUTURE_EPOCH</code> everywhere.</strong> Activation happens later:
+        <ol>
+            <li>Deposit processed → validator created with <code>FAR_FUTURE_EPOCH</code></li>
+            <li>Epoch processing checks if <code>effective_balance >= MAX_EFFECTIVE_BALANCE</code> → sets <code>activation_eligibility_epoch</code></li>
+            <li>Activation queue processes → sets <code>activation_epoch</code></li>
+            <li>That epoch arrives → validator is active</li>
+        </ol>
+    </div>
+
+    <p><strong>MIN_DEPOSIT_AMOUNT = 1 ETH</strong>: You can deposit 1 ETH, but you won't activate until you reach 32 ETH via top-ups.</p>
+
+    <h2><span class="emoji">⚠️</span> Gotchas & Edge Cases</h2>
+
+    <div class="warning">
+        <ol>
+            <li><strong>ETH is one-way until Capella</strong>: Pre-Capella, deposited ETH was locked forever. Now withdrawals work, but the deposit contract itself is still append-only.</li>
+            <li><strong>Invalid signature = lost ETH</strong>: If your BLS signature is wrong, the deposit is recorded on EL, but no validator is created. The ETH is effectively burned.</li>
+            <li><strong>Withdrawal credentials are immutable</strong>: Whatever you set at deposit time is permanent — with one exception: <code>BLSToExecutionChange</code> (Capella) can migrate from BLS to ETH1 withdrawal creds.</li>
+            <li><strong>32-deposit attack vector</strong>: In early designs, an attacker could spam 32 fake deposits to delay real ones. <code>MAX_DEPOSITS = 16</code> per block limits the attack surface.</li>
+            <li><strong>Eth1 follow distance</strong>: Before merge, CL waited ~8 hours behind EL head for safety. Post-merge, this still exists conceptually in the voting period.</li>
+        </ol>
+    </div>
+
+    <h3><span class="emoji">🔮</span> Electra Changes (EIP-6110)</h3>
+    <p>Deposits will come through <code>ExecutionPayload.deposit_requests</code> instead of the old Merkle proof system. The deposit contract remains, but CL reads deposits directly from EL blocks. No more voting lag.</p>
+
+    <h2><span class="emoji">🔗</span> Connections</h2>
+    <ul>
+        <li><strong>Lesson 7 (Checkpoints)</strong>: Eth1Data becomes finalized along with the checkpoint containing it</li>
+        <li><strong>Lesson 9 (Merkle Proofs)</strong>: The <code>is_valid_merkle_branch</code> function verifies deposit inclusion</li>
+        <li><strong>Lesson 14 (Next)</strong>: Activation queue and churn — what happens after deposit is processed</li>
+    </ul>
+
+    <h2><span class="emoji">📊</span> Key Constants</h2>
+    <table>
+        <tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
+        <tr><td><code>DEPOSIT_CONTRACT_TREE_DEPTH</code></td><td>32</td><td>Max ~4B deposits ever</td></tr>
+        <tr><td><code>MAX_DEPOSITS</code></td><td>16</td><td>Per block limit</td></tr>
+        <tr><td><code>MIN_DEPOSIT_AMOUNT</code></td><td>1 ETH</td><td>Minimum to record</td></tr>
+        <tr><td><code>EPOCHS_PER_ETH1_VOTING_PERIOD</code></td><td>64</td><td>~6.8 hours</td></tr>
+    </table>
+
+    <h2><span class="emoji">📖</span> Further Reading</h2>
+    <ul>
+        <li><a href="https://eips.ethereum.org/EIPS/eip-6110">EIP-6110</a>: EL-triggered deposits (Electra)</li>
+        <li><a href="https://github.com/ethereum/research/blob/master/beacon_chain_impl/progressive_merkle_tree.py">Progressive Merkle Tree</a>: The O(log n) storage trick</li>
+    </ul>
+
+    <hr>
+    <p><em>Tomorrow: Lesson 14 — Activation Queue and Churn</em></p>
+</body>
+</html>

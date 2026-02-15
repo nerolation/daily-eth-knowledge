@@ -1,5 +1,11 @@
 [
   {
+    "file": "013-deposits-and-deposit-contract.html",
+    "title": "Deposits and the Deposit Contract",
+    "date": "2026-02-15",
+    "number": 13
+  },
+  {
     "file": "011-effective-balance-hysteresis.html",
     "title": "Effective Balance vs Actual Balance",
     "date": "2026-02-14",
