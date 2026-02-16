@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 14: Activation Queue and Churn</title>
+    <meta name="description" content="Understanding the rate-limiting system that prevents rapid validator set changes in Ethereum consensus">
+    <meta name="keywords" content="ethereum, consensus, activation queue, churn limit, validator lifecycle, phase0, electra">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code { background: none; padding: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .spec-ref {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            border-left: 3px solid var(--accent);
+            margin: 1rem 0;
+        }
+        .gotcha {
+            background: #2d1b1b;
+            border-left: 3px solid #f85149;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        .connection {
+            background: #1b2d1b;
+            border-left: 3px solid #3fb950;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 14: Activation Queue and Churn</h1>
+    <p><em>Module 2: Validator Lifecycle — The rate-limiting system that prevents rapid validator set changes</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Location</strong><br>
+        <code>phase0/beacon-chain.md</code> → <code>get_validator_churn_limit</code>, <code>is_eligible_for_activation_queue</code>, <code>process_registry_updates</code><br>
+        <code>electra/beacon-chain.md</code> → <code>get_balance_churn_limit</code>, <code>get_activation_exit_churn_limit</code>, balance-based churn
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p>The activation queue is Ethereum's <strong>rate limiter for validator set changes</strong>. Without it, an attacker could activate 100,000 validators in a single epoch and gain 51% control before anyone could respond.</p>
+
+    <p><strong>The Invariant:</strong> The validator set changes slowly enough that honest participants can detect and respond to attacks.</p>
+
+    <p><strong>Two key mechanisms:</strong></p>
+    <ol>
+        <li><strong>Activation Eligibility</strong> — You enter the queue when your balance reaches the threshold</li>
+        <li><strong>Churn Limit</strong> — Only N validators can activate per epoch, where N scales with the total validator count</li>
+    </ol>
+
+    <h2>🛠 The Phase0 Churn Calculation</h2>
+
+    <pre><code class="language-python">def get_validator_churn_limit(state: BeaconState) -> uint64:
+    """
+    Return the validator churn limit for the current epoch.
+    """
+    active_validator_indices = get_active_validator_indices(
+        state, get_current_epoch(state)
+    )
+    return max(
+        MIN_PER_EPOCH_CHURN_LIMIT,  # = 4
+        uint64(len(active_validator_indices)) // CHURN_LIMIT_QUOTIENT  # ÷ 65536
+    )</code></pre>
+
+    <p><strong>The formula:</strong> <code>max(4, active_validators / 65536)</code></p>
+
+    <p>With 1M validators: <code>1,000,000 / 65536 ≈ 15</code> validators per epoch</p>
+
+    <p>At 6.4 min/epoch, activating 100k validators takes: <code>100000 / 15 * 6.4 ≈ 296 days</code></p>
+
+    <p>That's the point — <strong>attacks require months of preparation</strong>, giving the community time to respond.</p>
+
+    <h2>🎯 Entering the Queue: Activation Eligibility</h2>
+
+    <pre><code class="language-python"># Phase0 version:
+def is_eligible_for_activation_queue(validator: Validator) -> bool:
+    """
+    Check if validator is eligible to be placed into activation queue.
+    """
+    return (
+        validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH
+        and validator.effective_balance == MAX_EFFECTIVE_BALANCE  # exactly 32 ETH
+    )
+
+# Electra version (EIP-7251):
+def is_eligible_for_activation_queue(validator: Validator) -> bool:
+    return (
+        validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH
+        and validator.effective_balance >= MIN_ACTIVATION_BALANCE  # at least 32 ETH
+    )</code></pre>
+
+    <p><strong>Key difference:</strong> Phase0 requires <em>exactly</em> 32 ETH effective balance (<code>==</code>), while Electra allows <em>at least</em> 32 ETH (<code>>=</code>) since validators can now hold up to 2048 ETH.</p>
+
+    <h3>The State Machine</h3>
+    <pre><code>Deposited → activation_eligibility_epoch = FAR_FUTURE (not in queue)
+         ↓ effective_balance reaches 32 ETH
+Eligible  → activation_eligibility_epoch = current_epoch + 1
+         ↓ wait for finalization
+Queued    → placement in queue is finalized
+         ↓ wait for churn capacity
+Active    → activation_epoch = compute_activation_exit_epoch(current)</code></pre>
+
+    <h3>Key constraint in is_eligible_for_activation:</h3>
+    <pre><code class="language-python">def is_eligible_for_activation(state: BeaconState, validator: Validator) -> bool:
+    return (
+        # Placement in queue is finalized
+        validator.activation_eligibility_epoch <= state.finalized_checkpoint.epoch
+        # Has not yet been activated
+        and validator.activation_epoch == FAR_FUTURE_EPOCH
+    )</code></pre>
+
+    <p><strong>Why finalization matters:</strong> You can't activate validators from unfinalized epochs. If those epochs get reorged, you'd have validators active in one fork but not another — consensus disaster.</p>
+
+    <h2>⚙️ The Queue Processing: Registry Updates</h2>
+
+    <pre><code class="language-python">def process_registry_updates(state: BeaconState) -> None:
+    # 1. Mark eligible validators (just hit 32 ETH)
+    for index, validator in enumerate(state.validators):
+        if is_eligible_for_activation_queue(validator):
+            validator.activation_eligibility_epoch = get_current_epoch(state) + 1
+
+        # Also handle ejections (balance dropped to 16 ETH)
+        if (
+            is_active_validator(validator, get_current_epoch(state))
+            and validator.effective_balance <= EJECTION_BALANCE  # 16 ETH
+        ):
+            initiate_validator_exit(state, ValidatorIndex(index))
+
+    # 2. Build sorted activation queue
+    activation_queue = sorted(
+        [i for i, v in enumerate(state.validators) 
+         if is_eligible_for_activation(state, v)],
+        key=lambda i: (state.validators[i].activation_eligibility_epoch, i)
+    )
+
+    # 3. Activate up to churn limit
+    for index in activation_queue[:get_validator_churn_limit(state)]:
+        validator = state.validators[index]
+        validator.activation_epoch = compute_activation_exit_epoch(
+            get_current_epoch(state)
+        )</code></pre>
+
+    <h3>The Activation Delay</h3>
+    <pre><code class="language-python">def compute_activation_exit_epoch(epoch: Epoch) -> Epoch:
+    return Epoch(epoch + 1 + MAX_SEED_LOOKAHEAD)  # +5 epochs total</code></pre>
+
+    <p><strong>Why 5 epochs?</strong> You need <code>MAX_SEED_LOOKAHEAD</code> (4) epochs for committee shuffling to be unpredictable, plus 1 for processing. Otherwise validators could grind deposits to get favorable committee assignments.</p>
+
+    <h2>🔄 Electra's Revolution: Balance-Based Churn</h2>
+
+    <p>Electra (EIP-7251) changes everything. With validators now able to hold up to 2048 ETH, <strong>count-based churn is broken</strong>.</p>
+
+    <p>Problem: A 2048 ETH validator controls 64x the stake of a 32 ETH validator, but count-based churn treats them equally.</p>
+
+    <h3>New churn is measured in Gwei:</h3>
+    <pre><code class="language-python">def get_balance_churn_limit(state: BeaconState) -> Gwei:
+    """Return the churn limit in Gwei for the current epoch."""
+    churn = max(
+        MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA,  # 128 ETH worth
+        get_total_active_balance(state) // CHURN_LIMIT_QUOTIENT
+    )
+    # Round down to EFFECTIVE_BALANCE_INCREMENT
+    return churn - churn % EFFECTIVE_BALANCE_INCREMENT</code></pre>
+
+    <h3>Separate churn buckets:</h3>
+    <pre><code class="language-python">def get_activation_exit_churn_limit(state: BeaconState) -> Gwei:
+    """Churn dedicated to activations and exits."""
+    return min(
+        MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT,  # 256 ETH
+        get_balance_churn_limit(state)
+    )
+
+def get_consolidation_churn_limit(state: BeaconState) -> Gwei:
+    """Remaining churn for consolidations."""
+    return get_balance_churn_limit(state) - get_activation_exit_churn_limit(state)</code></pre>
+
+    <p><strong>Why split them?</strong> Consolidations are lower risk (stake just moves, total doesn't change), so they get their own budget. Activations/exits change total stake, so they're rate-limited more strictly.</p>
+
+    <h2>❓ Why This Design?</h2>
+
+    <table>
+        <tr><th>Concern</th><th>Solution</th></tr>
+        <tr><td>51% attack</td><td>Attacker needs months to accumulate majority stake</td></tr>
+        <tr><td>Market manipulation</td><td>Exit queue prevents instant dumps</td></tr>
+        <tr><td>Finality safety</td><td>New validators can't vote on unfinalized history</td></tr>
+        <tr><td>Committee security</td><td>Activation delay > lookahead prevents grinding</td></tr>
+        <tr><td>MaxEB compatibility</td><td>Balance-based churn scales with stake, not count</td></tr>
+    </table>
+
+    <div class="connection">
+        <h3>🔗 Connections</h3>
+        <ul>
+            <li><strong>Deposits (Lesson 13)</strong> → Deposits set <code>effective_balance</code>, triggering queue eligibility</li>
+            <li><strong>Effective Balance (Lesson 11)</strong> → The hysteresis prevents queue flickering</li>
+            <li><strong>Voluntary Exits (Lesson 15)</strong> → Uses same churn bucket, same <code>initiate_validator_exit</code></li>
+            <li><strong>Shuffling (Lesson 23)</strong> → <code>MAX_SEED_LOOKAHEAD</code> in activation delay ensures shuffle unpredictability</li>
+        </ul>
+    </div>
+
+    <div class="gotcha">
+        <h3>⚠️ Gotchas</h3>
+        <ol>
+            <li><strong>Queue ordering matters:</strong> <code>(activation_eligibility_epoch, index)</code> — first deposited within an epoch wins tiebreaks</li>
+            <li><strong>Finalization dependency:</strong> If finality stalls, the activation queue stalls. No new validators during inactivity leak.</li>
+            <li><strong>Electra's churn split:</strong> Exit consumes from <code>exit_balance_to_consume</code>, not a count. A single 2048 ETH exit could consume 8 epochs of churn.</li>
+            <li><strong>Ejection vs Exit:</strong> Ejection (balance ≤16 ETH) is forced and uses the same exit queue — you can't escape churn limits.</li>
+            <li><strong>Phase0→Electra transition:</strong> The churn mechanism fundamentally changes. Old count-based thinking doesn't apply.</li>
+        </ol>
+    </div>
+
+    <hr>
+    <p>📖 <strong>Next:</strong> Lesson 15 — Voluntary Exits. How validators gracefully leave and why <code>SHARD_COMMITTEE_PERIOD</code> exists.</p>
+</body>
+</html>
