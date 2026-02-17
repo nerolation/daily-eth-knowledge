@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 15: Voluntary Exits</title>
+    <meta name="description" content="Understanding how validators gracefully depart the active set while maintaining security assumptions in Ethereum consensus">
+    <meta name="keywords" content="ethereum, consensus, voluntary exit, validator lifecycle, exit queue, SHARD_COMMITTEE_PERIOD, withdrawable epoch">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code { background: none; padding: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .spec-ref {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            border-left: 3px solid var(--accent);
+            margin: 1rem 0;
+        }
+        .gotcha {
+            background: #2d1b1b;
+            border-left: 3px solid #f85149;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        .connection {
+            background: #1b2d1b;
+            border-left: 3px solid #3fb950;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 15: Voluntary Exits</h1>
+    <p><em>Module 2: Validator Lifecycle — Graceful departure while maintaining security assumptions</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec References:</strong><br>
+        <code>phase0/beacon-chain.md</code> → VoluntaryExit container (line 529)<br>
+        <code>phase0/beacon-chain.md</code> → process_voluntary_exit (line 2095)<br>
+        <code>phase0/beacon-chain.md</code> → initiate_validator_exit (line 1206)<br>
+        <code>electra/beacon-chain.md</code> → Modified exit processing (line 1706)
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p>
+        A voluntary exit is how a validator signals their intent to leave the active set. Unlike slashing (involuntary, punitive),
+        a voluntary exit is a <strong>graceful departure</strong>—the validator keeps all their stake and can withdraw after a delay.
+    </p>
+    <p>
+        The exit system is designed around two key constraints: <strong>preventing rapid validator set changes</strong> (churn limit)
+        and <strong>ensuring validators can be held accountable</strong> for past attestations (withdrawability delay).
+    </p>
+
+    <h2>🛠 The VoluntaryExit Container</h2>
+    <pre><code>class VoluntaryExit(Container):
+    epoch: Epoch              # When this exit becomes valid
+    validator_index: ValidatorIndex</code></pre>
+
+    <p>The exit message specifies:</p>
+    <ul>
+        <li><strong>epoch</strong> — The earliest epoch at which this exit is valid. This prevents exit messages from being "saved" and broadcast later maliciously.</li>
+        <li><strong>validator_index</strong> — Who wants to exit.</li>
+    </ul>
+
+    <p>The signed version wraps this with a BLS signature:</p>
+    <pre><code>class SignedVoluntaryExit(Container):
+    message: VoluntaryExit
+    signature: BLSSignature</code></pre>
+
+    <h2>🛠 Exit Processing (Phase 0)</h2>
+    <pre><code>def process_voluntary_exit(
+    state: BeaconState, 
+    signed_voluntary_exit: SignedVoluntaryExit
+) -> None:
+    voluntary_exit = signed_voluntary_exit.message
+    validator = state.validators[voluntary_exit.validator_index]
+    
+    # 1. Verify the validator is active
+    assert is_active_validator(validator, get_current_epoch(state))
+    
+    # 2. Verify exit has not been initiated
+    assert validator.exit_epoch == FAR_FUTURE_EPOCH
+    
+    # 3. Exits must specify an epoch when they become valid
+    assert get_current_epoch(state) >= voluntary_exit.epoch
+    
+    # 4. Verify the validator has been active long enough
+    assert get_current_epoch(state) >= validator.activation_epoch + SHARD_COMMITTEE_PERIOD
+    
+    # 5. Verify signature
+    domain = get_domain(state, DOMAIN_VOLUNTARY_EXIT, voluntary_exit.epoch)
+    signing_root = compute_signing_root(voluntary_exit, domain)
+    assert bls.Verify(validator.pubkey, signing_root, signed_voluntary_exit.signature)
+    
+    # 6. Initiate exit
+    initiate_validator_exit(state, voluntary_exit.validator_index)</code></pre>
+
+    <h2>❓ Why SHARD_COMMITTEE_PERIOD?</h2>
+    <p>
+        The <code>SHARD_COMMITTEE_PERIOD = 256 epochs (~27 hours)</code> delay before exit eligibility exists for a critical security reason:
+    </p>
+    <p>
+        <strong>Attesters can be held accountable for past votes.</strong> If a validator could exit immediately after activation,
+        they could attest to a malicious fork, then exit before the slashing evidence could be submitted. The 256-epoch minimum
+        active period ensures there's always time to catch and slash misbehavior.
+    </p>
+    <p>
+        This is the same constant used elsewhere—it's roughly the time it takes to be confident that all attestations from
+        a validator's duties have either been included on-chain or expired.
+    </p>
+
+    <h2>🛠 The initiate_validator_exit Function</h2>
+    <pre><code>def initiate_validator_exit(state: BeaconState, index: ValidatorIndex) -> None:
+    """
+    Initiate the exit of the validator with index ``index``.
+    """
+    # Return if validator already initiated exit
+    validator = state.validators[index]
+    if validator.exit_epoch != FAR_FUTURE_EPOCH:
+        return
+
+    # Compute exit queue epoch
+    exit_epochs = [v.exit_epoch for v in state.validators if v.exit_epoch != FAR_FUTURE_EPOCH]
+    exit_queue_epoch = max(
+        exit_epochs + [compute_activation_exit_epoch(get_current_epoch(state))]
+    )
+    exit_queue_churn = len([v for v in state.validators if v.exit_epoch == exit_queue_epoch])
+    if exit_queue_churn >= get_validator_churn_limit(state):
+        exit_queue_epoch += Epoch(1)
+
+    # Set validator exit epoch and withdrawable epoch
+    validator.exit_epoch = exit_queue_epoch
+    validator.withdrawable_epoch = Epoch(
+        validator.exit_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY
+    )</code></pre>
+
+    <p>Key mechanism:</p>
+    <ol>
+        <li><strong>Idempotent check</strong> — If already exiting, do nothing</li>
+        <li><strong>Find the exit queue epoch</strong> — The earliest epoch with room in the churn limit</li>
+        <li><strong>Set exit_epoch</strong> — When validator stops being "active"</li>
+        <li><strong>Set withdrawable_epoch</strong> — When funds can actually leave</li>
+    </ol>
+
+    <h2>📊 The Exit Timeline</h2>
+    <table>
+        <tr>
+            <th>Stage</th>
+            <th>Duration</th>
+            <th>Validator Status</th>
+        </tr>
+        <tr>
+            <td>Active (minimum)</td>
+            <td>256 epochs (~27 hours)</td>
+            <td>Must be active for SHARD_COMMITTEE_PERIOD before exit is allowed</td>
+        </tr>
+        <tr>
+            <td>Exit queued</td>
+            <td>Variable (churn limited)</td>
+            <td>Still active, participating in duties</td>
+        </tr>
+        <tr>
+            <td>Exited (not yet withdrawable)</td>
+            <td>256 epochs (~27 hours)</td>
+            <td>No longer active, but funds locked (MIN_VALIDATOR_WITHDRAWABILITY_DELAY)</td>
+        </tr>
+        <tr>
+            <td>Withdrawable</td>
+            <td>Until processed</td>
+            <td>Funds can be swept by automatic withdrawal</td>
+        </tr>
+    </table>
+
+    <h2>❓ Why MIN_VALIDATOR_WITHDRAWABILITY_DELAY?</h2>
+    <p>
+        The 256-epoch delay between <code>exit_epoch</code> and <code>withdrawable_epoch</code> serves two purposes:
+    </p>
+    <ol>
+        <li><strong>Slashing window</strong> — Even after exiting, validators can still be slashed for past misbehavior. 
+            This delay ensures their stake is still at risk long enough for evidence to surface.</li>
+        <li><strong>Finality considerations</strong> — The chain needs time to finalize blocks that the validator 
+            attested to while active.</li>
+    </ol>
+
+    <h2>🔄 Electra Changes (EIP-7251)</h2>
+    <p>Electra modifies voluntary exit processing in two key ways:</p>
+
+    <h3>1. Pending Withdrawals Check</h3>
+    <pre><code>def process_voluntary_exit(state, signed_voluntary_exit) -> None:
+    # ... same checks as phase0 ...
+    
+    # [New in Electra:EIP7251]
+    # Only exit validator if it has no pending withdrawals in the queue
+    assert get_pending_balance_to_withdraw(
+        state, voluntary_exit.validator_index
+    ) == 0
+    # ...</code></pre>
+
+    <p>
+        With MaxEB (variable effective balance up to 2048 ETH), validators can have <strong>partial withdrawals</strong>
+        queued. You can't exit while you have pending partial withdrawals—this prevents edge cases where
+        withdrawal and exit processing could conflict.
+    </p>
+
+    <h3>2. Fixed Domain Version</h3>
+    <pre><code># In Electra, the domain is pinned to CAPELLA_FORK_VERSION
+domain = compute_domain(
+    DOMAIN_VOLUNTARY_EXIT, 
+    CAPELLA_FORK_VERSION,  # Always Capella, not current fork
+    state.genesis_validators_root
+)</code></pre>
+
+    <p>
+        This is crucial: <strong>exit messages signed pre-Electra remain valid</strong>. Without this, every validator
+        who pre-signed an exit message before Electra would need to re-sign. The domain is pinned to Capella
+        for forward compatibility.
+    </p>
+
+    <h3>3. Balance-Based Churn</h3>
+    <pre><code>def initiate_validator_exit(state: BeaconState, index: ValidatorIndex) -> None:
+    # ... same idempotent check ...
+
+    # Compute exit queue epoch [Modified in Electra:EIP7251]
+    exit_queue_epoch = compute_exit_epoch_and_update_churn(
+        state, 
+        validator.effective_balance  # Now considers actual balance!
+    )
+    # ...</code></pre>
+
+    <p>
+        Pre-Electra: churn counted <em>validators</em> (up to N validators per epoch).<br>
+        Post-Electra: churn counts <em>balance</em> (up to X ETH worth of exits per epoch).
+    </p>
+    <p>
+        This means a 2048 ETH validator takes 64× longer to exit than a 32 ETH validator—proportional to their stake weight.
+    </p>
+
+    <div class="gotcha">
+        <strong>⚠️ Gotcha: Pre-signed Exit Messages</strong><br>
+        Validators (especially in staking services) often pre-sign exit messages and give them to a third party.
+        These messages specify an <code>epoch</code> field—if the epoch is too far in the future, the exit won't
+        be processable until that epoch arrives. If it's in the past, it's valid now. Choose carefully.
+    </div>
+
+    <div class="gotcha">
+        <strong>⚠️ Gotcha: Slashing After Exit</strong><br>
+        A validator can be slashed even after initiating exit, as long as they haven't passed <code>withdrawable_epoch</code>.
+        The <code>slashed</code> flag is set, and <code>withdrawable_epoch</code> is pushed out to
+        <code>max(current_withdrawable_epoch, epoch + EPOCHS_PER_SLASHINGS_VECTOR)</code>.
+    </div>
+
+    <div class="connection">
+        <strong>🔗 Connection: Exit vs Slashing</strong><br>
+        Both voluntary exits and slashing call <code>initiate_validator_exit()</code>. The difference:
+        <ul>
+            <li>Voluntary exit: keeps full balance, normal withdrawability delay</li>
+            <li>Slashing: loses portion of balance, extended withdrawability delay, marked as slashed</li>
+        </ul>
+    </div>
+
+    <div class="connection">
+        <strong>🔗 Connection: Exit Queue and Activation Queue</strong><br>
+        Yesterday's lesson covered the activation queue—the exit queue works identically in reverse.
+        Same churn limit applies, same <code>compute_activation_exit_epoch()</code> for minimum epoch calculation.
+        This symmetry is intentional: the protocol limits how fast the validator set can change in either direction.
+    </div>
+
+    <h2>📈 Constants Summary</h2>
+    <table>
+        <tr>
+            <th>Constant</th>
+            <th>Value</th>
+            <th>Purpose</th>
+        </tr>
+        <tr>
+            <td><code>MAX_VOLUNTARY_EXITS</code></td>
+            <td>16</td>
+            <td>Max exits processable per block</td>
+        </tr>
+        <tr>
+            <td><code>SHARD_COMMITTEE_PERIOD</code></td>
+            <td>256 epochs (~27h)</td>
+            <td>Minimum time active before exit allowed</td>
+        </tr>
+        <tr>
+            <td><code>MIN_VALIDATOR_WITHDRAWABILITY_DELAY</code></td>
+            <td>256 epochs (~27h)</td>
+            <td>Delay between exit and withdrawable</td>
+        </tr>
+        <tr>
+            <td><code>FAR_FUTURE_EPOCH</code></td>
+            <td>2^64 - 1</td>
+            <td>Sentinel for "not set"</td>
+        </tr>
+    </table>
+
+    <h2>🎯 Key Takeaways</h2>
+    <ol>
+        <li><strong>Exits are voluntary and non-punitive</strong> — You keep your stake, just have to wait.</li>
+        <li><strong>Two delays protect the network</strong> — SHARD_COMMITTEE_PERIOD before exit, MIN_VALIDATOR_WITHDRAWABILITY_DELAY after.</li>
+        <li><strong>Churn limits apply symmetrically</strong> — Exit queue mirrors activation queue.</li>
+        <li><strong>Electra adds balance-based churn</strong> — Big validators take proportionally longer to exit.</li>
+        <li><strong>Pre-signed exits work across forks</strong> — Domain pinned to Capella for compatibility.</li>
+    </ol>
+
+    <p style="text-align: center; margin-top: 2rem; color: #8b949e;">
+        <em>Tomorrow: Lesson 16 — Slashing Mechanics</em>
+    </p>
+</body>
+</html>
