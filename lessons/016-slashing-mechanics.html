@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 16: Slashing Mechanics</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1, h2, h3 { color: #1a1a2e; }
+        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+        pre { background: #1a1a2e; color: #e8e8e8; padding: 15px; border-radius: 8px; overflow-x: auto; }
+        pre code { background: none; padding: 0; }
+        .spec-ref { background: #e8f4fc; padding: 10px; border-left: 3px solid #3498db; margin: 15px 0; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background: #f8f9fa; }
+        .key-insight { background: #fff3cd; padding: 10px; border-radius: 5px; margin: 15px 0; }
+        .connection { background: #d4edda; padding: 10px; border-radius: 5px; margin: 15px 0; }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 16: Slashing Mechanics</h1>
+    <p><em>The economic enforcement that makes Ethereum's security guarantees credible</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Locations:</strong><br>
+        • <code>phase0/beacon-chain.md</code> → <code>slash_validator</code>, <code>process_slashings</code>, <code>is_slashable_attestation_data</code><br>
+        • <code>electra/beacon-chain.md</code> → Modified <code>slash_validator</code> (EIP-7251)
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p>Slashing is the protocol's answer to: "How do you make attacks economically irrational?"</p>
+    <p>Two behaviors are slashable:</p>
+    <ol>
+        <li><strong>Proposer slashing</strong>: Sign two different blocks for the same slot</li>
+        <li><strong>Attester slashing</strong>: Double vote (same target epoch) or surround vote (conflicting FFG links)</li>
+    </ol>
+    <p>Both directly threaten consensus safety. Casper FFG's finality guarantee depends on >2/3 honest stake—if an attacker could finalize conflicting chains, the slashing penalty must exceed any possible gain.</p>
+
+    <h2>🛠 What Gets You Slashed</h2>
+    <pre><code>def is_slashable_attestation_data(
+    data_1: AttestationData, 
+    data_2: AttestationData
+) -> bool:
+    return (
+        # Double vote: different attestations, same target epoch
+        (data_1 != data_2 and 
+         data_1.target.epoch == data_2.target.epoch)
+        or
+        # Surround vote: data_1 "surrounds" data_2
+        (data_1.source.epoch < data_2.source.epoch and 
+         data_2.target.epoch < data_1.target.epoch)
+    )</code></pre>
+
+    <p><strong>Double voting</strong>: You attested to two different things in the same epoch. This enables equivocation—trying to finalize two conflicting histories.</p>
+    <p><strong>Surround voting</strong>: Your source→target link "surrounds" another. This breaks the monotonicity that Casper FFG requires. If validators could freely surround-vote, they could justify conflicting checkpoints.</p>
+
+    <h2>🛠 The <code>slash_validator</code> Function</h2>
+    <p>When slashing evidence is processed, this executes:</p>
+    <pre><code>def slash_validator(
+    state: BeaconState,
+    slashed_index: ValidatorIndex,
+    whistleblower_index: Optional[ValidatorIndex] = None,
+) -> None:
+    epoch = get_current_epoch(state)
+    
+    # 1. Force exit
+    initiate_validator_exit(state, slashed_index)
+    
+    # 2. Mark as slashed, extend withdrawal delay
+    validator = state.validators[slashed_index]
+    validator.slashed = True
+    validator.withdrawable_epoch = max(
+        validator.withdrawable_epoch, 
+        Epoch(epoch + EPOCHS_PER_SLASHINGS_VECTOR)  # ~36 days
+    )
+    
+    # 3. Record for correlation penalty calculation
+    state.slashings[epoch % EPOCHS_PER_SLASHINGS_VECTOR] += \
+        validator.effective_balance
+    
+    # 4. Immediate penalty (1/32 of stake in Bellatrix+)
+    slashing_penalty = validator.effective_balance // \
+        MIN_SLASHING_PENALTY_QUOTIENT  # 32 in Bellatrix
+    decrease_balance(state, slashed_index, slashing_penalty)
+    
+    # 5. Reward whistleblower and proposer
+    whistleblower_reward = validator.effective_balance // \
+        WHISTLEBLOWER_REWARD_QUOTIENT  # 512
+    proposer_reward = whistleblower_reward // PROPOSER_REWARD_QUOTIENT
+    increase_balance(state, proposer_index, proposer_reward)
+    increase_balance(state, whistleblower_index, 
+                     whistleblower_reward - proposer_reward)</code></pre>
+
+    <div class="key-insight">
+        <strong>Key insight</strong>: The <code>slashings</code> vector accumulates effective balances of everyone slashed per epoch. This enables the <em>correlation penalty</em> later.
+    </div>
+
+    <h2>⚠️ The Correlation Penalty (<code>process_slashings</code>)</h2>
+    <p>The second penalty happens ~18 days after slashing (midpoint of the 36-day window):</p>
+    <pre><code>def process_slashings(state: BeaconState) -> None:
+    epoch = get_current_epoch(state)
+    total_balance = get_total_active_balance(state)
+    
+    adjusted_total_slashing_balance = min(
+        sum(state.slashings) * PROPORTIONAL_SLASHING_MULTIPLIER,  # 3x
+        total_balance
+    )
+    
+    for index, validator in enumerate(state.validators):
+        if (validator.slashed and 
+            epoch + EPOCHS_PER_SLASHINGS_VECTOR // 2 == 
+            validator.withdrawable_epoch):
+            
+            # Penalty scales with % of network slashed
+            penalty = (validator.effective_balance // increment 
+                      * adjusted_total_slashing_balance) \
+                      // total_balance * increment
+            decrease_balance(state, index, penalty)</code></pre>
+
+    <h3>Why this design?</h3>
+    <p>Accidental slashing (single validator, key misconfig): penalty ≈ 0<br>
+    Coordinated attack (1/3 of stake): penalty = <strong>full stake</strong></p>
+    <p>The 3x multiplier means if 1/3 of stake gets slashed within 36 days, each slashed validator loses their <em>entire</em> effective balance. This makes coordinated attacks cost ~proportional to the stake they'd need to break finality.</p>
+
+    <table>
+        <tr><th>% Network Slashed</th><th>Total Penalty</th></tr>
+        <tr><td>0.01%</td><td>~0.03%</td></tr>
+        <tr><td>1%</td><td>~3%</td></tr>
+        <tr><td>10%</td><td>~30%</td></tr>
+        <tr><td>33.3%</td><td>100%</td></tr>
+    </table>
+
+    <h2>📈 Parameter Evolution Across Forks</h2>
+    <p>The constants have tightened over time:</p>
+    <table>
+        <tr><th>Fork</th><th>MIN_SLASHING_PENALTY_QUOTIENT</th><th>PROPORTIONAL_MULTIPLIER</th></tr>
+        <tr><td>Phase0</td><td>128 (~0.8%)</td><td>1</td></tr>
+        <tr><td>Altair</td><td>64 (~1.6%)</td><td>2</td></tr>
+        <tr><td>Bellatrix</td><td>32 (~3.1%)</td><td>3</td></tr>
+        <tr><td>Electra</td><td>4096 (~0.02%)*</td><td>3</td></tr>
+    </table>
+    <p><em>*Electra's quotient is higher because MaxEB validators can have 2048 ETH. The effective penalty rate per unit stake is similar.</em></p>
+
+    <div class="connection">
+        <strong>🔗 Connections:</strong><br>
+        • Lesson 17-18: ProposerSlashing/AttesterSlashing containers<br>
+        • Lesson 7: Checkpoints—what surround voting violates<br>
+        • Lesson 52: Safety/liveness and the 1/3 threshold
+    </div>
+
+    <h2>❓ Why This Way?</h2>
+    <ol>
+        <li><strong>Immediate + delayed penalty</strong>: Immediate penalty prevents "slash-and-withdraw." Delayed correlation penalty lets the protocol observe how coordinated the attack was.</li>
+        <li><strong>36-day window</strong>: EPOCHS_PER_SLASHINGS_VECTOR = 8192 epochs ≈ 36 days. Long enough to catch coordinated attacks spread over time.</li>
+        <li><strong>Whistleblower incentive</strong>: Anyone can submit slashing evidence. The 1/512 reward incentivizes monitoring without being so high it encourages entrapment schemes.</li>
+    </ol>
+
+    <footer>
+        <p><em>⚙️ Lesson 16/100 — February 18, 2026</em></p>
+    </footer>
+</body>
+</html>
