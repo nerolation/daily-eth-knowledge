@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 17: Proposer Slashing | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into proposer slashing mechanics in Ethereum consensus - detecting and punishing double-block proposals">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+            --green: #3fb950;
+            --red: #f85149;
+            --yellow: #d29922;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
+        h2 { color: var(--green); margin: 2rem 0 1rem; font-size: 1.3rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h3 { color: var(--yellow); margin: 1.5rem 0 0.75rem; font-size: 1.1rem; }
+        .meta { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+        p { margin-bottom: 1rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            border: 1px solid var(--border);
+        }
+        pre code { padding: 0; background: none; }
+        .highlight { color: var(--accent); }
+        .warning { color: var(--yellow); }
+        ul { margin: 1rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.5rem; }
+        .callout {
+            background: var(--code-bg);
+            border-left: 3px solid var(--accent);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .penalty { border-left-color: var(--red); }
+        .reward { border-left-color: var(--green); }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+        th { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>⚙️ Lesson 17: Proposer Slashing</h1>
+        <p class="meta">Module 2: Validator Lifecycle | February 19, 2026</p>
+    </header>
+
+    <section>
+        <h2>📚 Topic</h2>
+        <p>Double-proposing detection and punishment — when a validator signs two different blocks for the same slot.</p>
+        <p><strong>Spec Location:</strong> <code>phase0/beacon-chain.md</code> → ProposerSlashing, process_proposer_slashing</p>
+    </section>
+
+    <section>
+        <h2>💡 Core Concept</h2>
+        <p>A proposer slashing catches validators who propose <strong>two different blocks for the same slot</strong>. Unlike attester slashing (which requires detecting conflicting votes), proposer slashing is <em>trivially detectable</em> — both headers exist on the network with the proposer's signature.</p>
+        
+        <p>The structure is minimal:</p>
+        <pre><code class="language-python">class ProposerSlashing(Container):
+    signed_header_1: SignedBeaconBlockHeader
+    signed_header_2: SignedBeaconBlockHeader</code></pre>
+
+        <p>The <code>SignedBeaconBlockHeader</code> wraps:</p>
+        <pre><code class="language-python">class BeaconBlockHeader(Container):
+    slot: Slot
+    proposer_index: ValidatorIndex
+    parent_root: Root
+    state_root: Root
+    body_root: Root</code></pre>
+
+        <p>To slash a proposer, you need two <strong>different</strong> signed headers for the <strong>same slot</strong> by the <strong>same proposer</strong>.</p>
+    </section>
+
+    <section>
+        <h2>🛠 The Slashing Logic</h2>
+        <pre><code class="language-python">def process_proposer_slashing(
+    state: BeaconState, 
+    proposer_slashing: ProposerSlashing
+) -> None:
+    header_1 = proposer_slashing.signed_header_1.message
+    header_2 = proposer_slashing.signed_header_2.message
+
+    # Verify header slots match
+    assert header_1.slot == header_2.slot
+    # Verify header proposer indices match
+    assert header_1.proposer_index == header_2.proposer_index
+    # Verify the headers are different
+    assert header_1 != header_2
+    # Verify the proposer is slashable
+    proposer = state.validators[header_1.proposer_index]
+    assert is_slashable_validator(proposer, get_current_epoch(state))
+    
+    # Verify signatures
+    for signed_header in (
+        proposer_slashing.signed_header_1, 
+        proposer_slashing.signed_header_2
+    ):
+        domain = get_domain(
+            state, DOMAIN_BEACON_PROPOSER, 
+            compute_epoch_at_slot(signed_header.message.slot)
+        )
+        signing_root = compute_signing_root(
+            signed_header.message, domain
+        )
+        assert bls.Verify(
+            proposer.pubkey, signing_root, signed_header.signature
+        )
+
+    slash_validator(state, header_1.proposer_index)</code></pre>
+
+        <h3>Five Checks, In Order</h3>
+        <ol>
+            <li><strong>Same slot</strong> — both headers must be for the same slot</li>
+            <li><strong>Same proposer</strong> — proposer_index must match</li>
+            <li><strong>Different content</strong> — headers must differ (otherwise no offense)</li>
+            <li><strong>Validator is slashable</strong> — not already slashed, still active</li>
+            <li><strong>Both signatures valid</strong> — verified with DOMAIN_BEACON_PROPOSER</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>❓ Why This Way</h2>
+        
+        <h3>Why is proposer slashing trivially detectable?</h3>
+        <p>When you propose a block, you gossip it to the network. If you propose <em>two</em> blocks for the same slot, both propagate. Anyone who receives both can construct the slashing evidence immediately. There's no hiding — the signatures prove it.</p>
+        <p>Compare to attester slashing: attestations can target different checkpoints in complex ways (surround votes). Proposer slashing is binary — same slot, different block, you're done.</p>
+
+        <h3>Why check is_slashable_validator?</h3>
+        <pre><code class="language-python">def is_slashable_validator(validator: Validator, epoch: Epoch) -> bool:
+    return (not validator.slashed) and (
+        validator.activation_epoch <= epoch < validator.withdrawable_epoch
+    )</code></pre>
+        <p>You can only be slashed if:</p>
+        <ul>
+            <li>You haven't been slashed already (no double-jeopardy)</li>
+            <li>You're currently active (between activation and withdrawable epoch)</li>
+        </ul>
+
+        <h3>Why verify signatures for a historical slot's domain?</h3>
+        <p>The domain includes the fork version at <code>compute_epoch_at_slot(header.slot)</code>. If the validator proposed during an old fork, we must verify against that fork's domain — not the current one. This is why the spec explicitly computes the domain per-header.</p>
+    </section>
+
+    <section>
+        <h2>💸 Penalties & Rewards</h2>
+        
+        <div class="callout penalty">
+            <h3>Immediate Penalty</h3>
+            <p><code>effective_balance // 128</code> (MIN_SLASHING_PENALTY_QUOTIENT)</p>
+            <p>For 32 ETH: <strong>0.25 ETH immediate loss</strong></p>
+        </div>
+
+        <div class="callout penalty">
+            <h3>Delayed Correlation Penalty</h3>
+            <p>Applied at withdrawable_epoch - 4096 epochs:</p>
+            <pre><code>penalty = (eff_balance * adjusted_slashing_balance) // total_balance</code></pre>
+            <p>If many validators slashed in the same window → penalty scales up</p>
+        </div>
+
+        <div class="callout reward">
+            <h3>Whistleblower Reward</h3>
+            <p><code>effective_balance // 512</code></p>
+            <p>For 32 ETH: <strong>0.0625 ETH</strong> (~$250 at $4k/ETH)</p>
+        </div>
+
+        <div class="callout reward">
+            <h3>Proposer Cut</h3>
+            <p>Whistleblower reward // 8</p>
+            <p>Block proposer who includes the slashing gets 1/8 of whistleblower reward</p>
+        </div>
+
+        <table>
+            <tr>
+                <th>Parameter</th>
+                <th>Value</th>
+                <th>Effect</th>
+            </tr>
+            <tr>
+                <td>MIN_SLASHING_PENALTY_QUOTIENT</td>
+                <td>128</td>
+                <td>~0.78% immediate penalty</td>
+            </tr>
+            <tr>
+                <td>WHISTLEBLOWER_REWARD_QUOTIENT</td>
+                <td>512</td>
+                <td>~0.2% reward</td>
+            </tr>
+            <tr>
+                <td>EPOCHS_PER_SLASHINGS_VECTOR</td>
+                <td>8192</td>
+                <td>~36 day exit delay</td>
+            </tr>
+            <tr>
+                <td>MAX_PROPOSER_SLASHINGS</td>
+                <td>16</td>
+                <td>Per block limit</td>
+            </tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>🔗 Connections</h2>
+        <ul>
+            <li><strong>Lesson 16 (Slashing Mechanics)</strong>: <code>slash_validator</code> handles the actual state changes</li>
+            <li><strong>Lesson 6 (Domains)</strong>: DOMAIN_BEACON_PROPOSER = 0x00000000 separates proposer signatures</li>
+            <li><strong>Lesson 18 (Attester Slashing)</strong>: More complex slashing with surround/double votes</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>⚠️ Gotchas</h2>
+        <ol>
+            <li><strong>Headers not blocks</strong>: We only need the <em>header</em> for slashing — not the full block body. This is more compact and still proves the offense.</li>
+            <li><strong>Ordering doesn't matter</strong>: <code>signed_header_1</code> vs <code>signed_header_2</code> are checked symmetrically.</li>
+            <li><strong>Historical slashings</strong>: You can submit slashing evidence for blocks from many epochs ago, as long as the validator is still slashable.</li>
+            <li><strong>State roots differ</strong>: Even if a proposer "accidentally" produced two blocks with same transactions, the <code>state_root</code> would differ, making them slashable.</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>📊 Real World</h2>
+        <p>Proposer slashings are <em>extremely rare</em>. Most slashings are attester slashings from:</p>
+        <ul>
+            <li>Misconfigured redundant setups (running same keys on two machines)</li>
+            <li>Database corruption causing re-signing</li>
+        </ul>
+        <p>Double-proposing almost never happens accidentally — you'd need to run the same proposer twice in the same slot, which validators actively guard against.</p>
+    </section>
+
+    <footer style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e;">
+        <p><strong>Next:</strong> Lesson 18 — Attester Slashing (surround voting, double voting, the FFG security backbone)</p>
+        <p style="margin-top: 1rem; font-size: 0.85rem;">Part of the Ethereum Consensus Specs Curriculum • <a href="https://github.com/ethereum/consensus-specs" style="color: var(--accent);">consensus-specs</a></p>
+    </footer>
+</body>
+</html>
