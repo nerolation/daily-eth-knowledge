@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 18: Attester Slashing | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into Attester Slashing - the Casper FFG enforcement mechanism that prevents double voting and surround voting attacks.">
+    <meta name="keywords" content="Ethereum, consensus, attester slashing, Casper FFG, double voting, surround voting, beacon chain">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+            --warning: #d29922;
+            --success: #3fb950;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
+        h2 { color: var(--accent); margin: 2rem 0 1rem; font-size: 1.3rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h3 { color: var(--fg); margin: 1.5rem 0 0.5rem; font-size: 1.1rem; }
+        .meta { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
+        p { margin: 1rem 0; }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.85rem;
+            margin: 1rem 0;
+        }
+        code {
+            background: var(--code-bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9em;
+        }
+        pre code { background: none; padding: 0; }
+        .spec-ref {
+            background: #1f2937;
+            border-left: 3px solid var(--accent);
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        .warning {
+            background: #2d2a1d;
+            border-left: 3px solid var(--warning);
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .key-insight {
+            background: #1a2e1a;
+            border-left: 3px solid var(--success);
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+        }
+        ul, ol { margin: 1rem 0; padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; justify-content: space-between; }
+        .nav a { color: var(--accent); text-decoration: none; }
+        .nav a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 18: Attester Slashing</h1>
+    <p class="meta">Module 2: Validator Lifecycle | Ethereum Consensus Specs Curriculum</p>
+
+    <h2>What We're Covering</h2>
+    <p>Yesterday we covered Proposer Slashing (double-proposing). Today: the more complex slashing type — <strong>Attester Slashing</strong>, which enforces the Casper FFG finality rules.</p>
+    <p>While proposer slashing is trivially detectable (same slot, different blocks), attester slashing detects <em>logical</em> violations in attestation patterns that would break finality guarantees.</p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Location:</strong> <code>phase0/beacon-chain.md</code><br>
+        • <code>AttesterSlashing</code> container (line 502)<br>
+        • <code>is_slashable_attestation_data</code> (line 759)<br>
+        • <code>process_attester_slashing</code> (line 1966)<br>
+        • <code>is_valid_indexed_attestation</code> (line 775)
+    </div>
+
+    <h2>The Two Slashable Offenses</h2>
+    <p>The Casper FFG paper defines exactly two behaviors that break safety:</p>
+
+    <h3>1️⃣ Double Voting</h3>
+    <p>Attesting to two different targets at the same epoch.</p>
+    <pre><code>Epoch N: Attest target = checkpoint A
+Epoch N: Attest target = checkpoint B (≠ A)</code></pre>
+    <p><strong>Why it's bad:</strong> You're voting for two conflicting histories at the same height. If enough validators do this, two conflicting checkpoints could both reach 2/3 votes.</p>
+
+    <h3>2️⃣ Surround Voting</h3>
+    <p>Casting an attestation that "surrounds" another attestation you made — i.e., with a wider source→target span that encompasses a previous narrower one.</p>
+    <pre><code>First:  source=3 → target=5
+Later:  source=2 → target=6  ← SURROUNDS the first!</code></pre>
+    <p><strong>Why it's bad:</strong> Surround votes could justify conflicting checkpoint chains. If your outer vote justifies a chain that contradicts your inner vote's chain, finality breaks.</p>
+
+    <h2>The Core Detection Function</h2>
+    <pre><code class="language-python">def is_slashable_attestation_data(
+    data_1: AttestationData, 
+    data_2: AttestationData
+) -> bool:
+    """
+    Check if data_1 and data_2 are slashable 
+    according to Casper FFG rules.
+    """
+    return (
+        # Double vote
+        (data_1 != data_2 and 
+         data_1.target.epoch == data_2.target.epoch)
+        or
+        # Surround vote
+        (data_1.source.epoch < data_2.source.epoch and 
+         data_2.target.epoch < data_1.target.epoch)
+    )</code></pre>
+
+    <div class="key-insight">
+        <strong>Reading the surround condition:</strong><br>
+        <code>data_1</code> surrounds <code>data_2</code> when:<br>
+        • <code>data_1.source</code> is OLDER than <code>data_2.source</code><br>
+        • <code>data_1.target</code> is NEWER than <code>data_2.target</code><br><br>
+        So <code>data_1</code> spans a wider range that encloses <code>data_2</code>.
+    </div>
+
+    <h2>The AttesterSlashing Container</h2>
+    <pre><code class="language-python">class AttesterSlashing(Container):
+    attestation_1: IndexedAttestation
+    attestation_2: IndexedAttestation</code></pre>
+
+    <p>Uses <code>IndexedAttestation</code> (not <code>Attestation</code>) because we need the explicit list of validator indices:</p>
+
+    <pre><code class="language-python">class IndexedAttestation(Container):
+    attesting_indices: List[ValidatorIndex, MAX_VALIDATORS_PER_COMMITTEE]
+    data: AttestationData
+    signature: BLSSignature</code></pre>
+
+    <p>The aggregate signature must verify against all <code>attesting_indices</code>.</p>
+
+    <h2>Processing Attester Slashings</h2>
+    <pre><code class="language-python">def process_attester_slashing(
+    state: BeaconState, 
+    attester_slashing: AttesterSlashing
+) -> None:
+    attestation_1 = attester_slashing.attestation_1
+    attestation_2 = attester_slashing.attestation_2
+    
+    # Check slashability
+    assert is_slashable_attestation_data(
+        attestation_1.data, attestation_2.data)
+    
+    # Verify both attestations are valid
+    assert is_valid_indexed_attestation(state, attestation_1)
+    assert is_valid_indexed_attestation(state, attestation_2)
+
+    # Find intersection of signers
+    slashed_any = False
+    indices = set(attestation_1.attesting_indices)
+               .intersection(attestation_2.attesting_indices)
+    
+    for index in sorted(indices):
+        if is_slashable_validator(
+            state.validators[index], get_current_epoch(state)):
+            slash_validator(state, index)
+            slashed_any = True
+    
+    assert slashed_any  # Must slash at least one</code></pre>
+
+    <div class="key-insight">
+        <strong>Key insight:</strong> Only validators who signed BOTH conflicting attestations get slashed. The intersection finds the guilty parties.
+    </div>
+
+    <h2>Validation: is_valid_indexed_attestation</h2>
+    <pre><code class="language-python">def is_valid_indexed_attestation(
+    state: BeaconState, 
+    indexed_attestation: IndexedAttestation
+) -> bool:
+    # Indices must be sorted and unique
+    indices = indexed_attestation.attesting_indices
+    if len(indices) == 0 or not indices == sorted(set(indices)):
+        return False
+    
+    # Verify aggregate signature
+    pubkeys = [state.validators[i].pubkey for i in indices]
+    domain = get_domain(state, DOMAIN_BEACON_ATTESTER, 
+                        indexed_attestation.data.target.epoch)
+    signing_root = compute_signing_root(
+        indexed_attestation.data, domain)
+    return bls.FastAggregateVerify(
+        pubkeys, signing_root, indexed_attestation.signature)</code></pre>
+
+    <p>The aggregate signature proves ALL listed validators signed this exact attestation data. No forging possible.</p>
+
+    <h2>Why This Design?</h2>
+    <h3>Casper FFG's Core Theorem</h3>
+    <p>If 2/3+ honest validators follow the rules, no two conflicting checkpoints can both be finalized. The slashing conditions are the <em>exact</em> behaviors that would violate this.</p>
+
+    <h3>The Math</h3>
+    <ul>
+        <li>Finalizing two conflicting checkpoints requires overlapping 2/3 votes</li>
+        <li>That overlap (~1/3 of validators) must have either double-voted or surround-voted</li>
+        <li>Slashing that 1/3 makes the attack cost > 1/3 of total stake</li>
+    </ul>
+
+    <h2>Proposer vs Attester Slashing</h2>
+    <table>
+        <tr>
+            <th>Aspect</th>
+            <th>Proposer</th>
+            <th>Attester</th>
+        </tr>
+        <tr>
+            <td><strong>Offense</strong></td>
+            <td>Two blocks same slot</td>
+            <td>FFG violations</td>
+        </tr>
+        <tr>
+            <td><strong>Detection</strong></td>
+            <td>Trivial (same slot)</td>
+            <td>Logical (epoch spans)</td>
+        </tr>
+        <tr>
+            <td><strong>Evidence</strong></td>
+            <td>Two block headers</td>
+            <td>Two attestations</td>
+        </tr>
+        <tr>
+            <td><strong>Per block limit</strong></td>
+            <td>16</td>
+            <td>2</td>
+        </tr>
+        <tr>
+            <td><strong>Max slashed</strong></td>
+            <td>1 per evidence</td>
+            <td>Many (intersection)</td>
+        </tr>
+    </table>
+
+    <p><code>MAX_ATTESTER_SLASHINGS = 2</code> because <code>IndexedAttestation</code> is large (up to 2048 indices).</p>
+
+    <h2>⚠️ Common Gotchas</h2>
+    <div class="warning">
+        <ol>
+            <li><strong>Order matters for surround detection</strong> — The function checks if <code>data_1</code> surrounds <code>data_2</code>, not symmetric. But the slashing itself just needs ANY surround relationship.</li>
+            <li><strong>Already-slashed validators ignored</strong> — <code>is_slashable_validator</code> checks <code>not validator.slashed</code>, so you can't slash someone twice.</li>
+            <li><strong>Exited validators still slashable</strong> — Until <code>withdrawable_epoch</code>, you remain slashable. Exit doesn't protect you.</li>
+        </ol>
+    </div>
+
+    <h2>Penalty Reminder (from Lesson 16)</h2>
+    <ul>
+        <li><strong>Phase0:</strong> Initial 1/128 effective balance</li>
+        <li><strong>Altair:</strong> Increased to 1/64 effective balance</li>
+        <li>Plus correlation penalty at withdrawal time (up to 3x stake if 1/3 slashed together)</li>
+    </ul>
+
+    <h2>Connections</h2>
+    <ul>
+        <li><strong>Yesterday's <code>slash_validator()</code></strong> — same function handles the actual penalty</li>
+        <li><strong>Lesson 7 (Checkpoints)</strong> — source/target in <code>AttestationData</code> are <code>Checkpoint</code> types</li>
+        <li><strong>Tomorrow: Withdrawals (Capella)</strong> — how to actually get ETH out</li>
+    </ul>
+
+    <div class="nav">
+        <a href="017-proposer-slashing.html">← Lesson 17: Proposer Slashing</a>
+        <a href="019-withdrawals.html">Lesson 19: Withdrawals →</a>
+    </div>
+
+    <p class="meta" style="margin-top: 2rem; text-align: center;">
+        Lesson 18 of 100 | Module 2: Validator Lifecycle<br>
+        <em>Tomorrow: Withdrawals — the exit door gets an actual mechanism</em>
+    </p>
+</body>
+</html>
