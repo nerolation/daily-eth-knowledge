@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 19: Withdrawals (Capella) - Ethereum Consensus Specs</title>
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --fg: #e0e0e0;
+            --accent: #7c3aed;
+            --accent-dim: #5b21b6;
+            --code-bg: #1a1a2e;
+            --border: #2d2d2d;
+        }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.7;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: #fff; }
+        h1 { border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border-left: 3px solid var(--accent);
+        }
+        pre code { background: none; padding: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .emoji { font-size: 1.2em; }
+        .topic { color: var(--accent); font-weight: 600; }
+        .warning { 
+            background: #2d1f1f;
+            border-left: 3px solid #ef4444;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        .insight {
+            background: #1f2d1f;
+            border-left: 3px solid #22c55e;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1><span class="emoji">⚙️</span> Lesson 19: Withdrawals (Capella)</h1>
+    <p><em>The missing piece that made staking complete</em></p>
+    
+    <hr>
+    
+    <h2><span class="emoji">📚</span> Topic</h2>
+    <p>Withdrawal credentials, BLS-to-execution changes, and the automatic sweep mechanism</p>
+    
+    <h2><span class="emoji">🔍</span> Spec Location</h2>
+    <p><code>capella/beacon-chain.md</code> → Withdrawals, BLSToExecutionChange</p>
+    
+    <hr>
+    
+    <h2><span class="emoji">💡</span> Core Concept</h2>
+    <p>Before Capella, ETH went in but couldn't come out. The deposit contract was a one-way door. Validators accumulated rewards, but there was no protocol-level mechanism to extract them.</p>
+    
+    <p>Capella introduced three critical features:</p>
+    <ol>
+        <li><strong>Full withdrawals</strong> — exited validators can reclaim their entire balance</li>
+        <li><strong>Partial withdrawals</strong> — active validators auto-sweep excess above 32 ETH</li>
+        <li><strong>BLS-to-execution change</strong> — convert 0x00 credentials to 0x01 to enable withdrawals</li>
+    </ol>
+    
+    <div class="insight">
+        <strong>Key insight:</strong> Withdrawals are <em>deterministic and automatic</em>. No gas costs. No transactions. The protocol sweeps through validators and pushes withdrawals to the execution layer.
+    </div>
+    
+    <h2><span class="emoji">🛠</span> The Withdrawal Container</h2>
+    
+    <pre><code>class Withdrawal(Container):
+    index: WithdrawalIndex      # Global monotonic counter
+    validator_index: ValidatorIndex
+    address: ExecutionAddress   # 20-byte EL address
+    amount: Gwei                # Amount in Gwei (not wei!)</code></pre>
+    
+    <p>Every withdrawal gets a unique <code>index</code> that never repeats. The <code>address</code> is extracted from the validator's withdrawal credentials (bytes 12-31 of the 32-byte credentials).</p>
+    
+    <h3>State Additions (BeaconState)</h3>
+    <pre><code>next_withdrawal_index: WithdrawalIndex
+next_withdrawal_validator_index: ValidatorIndex</code></pre>
+    
+    <p>These track the sweep position. The protocol maintains a cursor that continuously cycles through all validators.</p>
+    
+    <h3>Constants</h3>
+    <table>
+        <tr><th>Name</th><th>Value</th><th>Purpose</th></tr>
+        <tr><td><code>MAX_WITHDRAWALS_PER_PAYLOAD</code></td><td>16</td><td>Cap per block</td></tr>
+        <tr><td><code>MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP</code></td><td>16,384</td><td>Max validators checked per block</td></tr>
+    </table>
+    
+    <h2><span class="emoji">🔐</span> Withdrawal Credentials: 0x00 vs 0x01</h2>
+    
+    <p>Validators have 32-byte <code>withdrawal_credentials</code>. The first byte determines the type:</p>
+    
+    <h3>0x00 (BLS prefix) — Cannot receive withdrawals</h3>
+    <pre><code>0x00 + hash(bls_pubkey)[1:]</code></pre>
+    <ul>
+        <li>Original format from Phase 0</li>
+        <li>Locked until converted to 0x01</li>
+        <li>Requires a signed <code>BLSToExecutionChange</code> operation</li>
+    </ul>
+    
+    <h3>0x01 (ETH1 prefix) — Withdrawal-enabled</h3>
+    <pre><code>0x01 + 0x00 * 11 + execution_address</code></pre>
+    <ul>
+        <li>The 20-byte EL address sits in bytes 12-31</li>
+        <li>This address receives all withdrawals automatically</li>
+    </ul>
+    
+    <p>The predicate that gates all withdrawals:</p>
+    <pre><code>def has_eth1_withdrawal_credential(validator: Validator) -> bool:
+    return validator.withdrawal_credentials[:1] == ETH1_ADDRESS_WITHDRAWAL_PREFIX</code></pre>
+    
+    <div class="warning">
+        <strong>No 0x01 credentials = no withdrawals. Period.</strong>
+    </div>
+    
+    <h2><span class="emoji">📤</span> Two Types of Withdrawals</h2>
+    
+    <h3>1. Full Withdrawal — Exited validator, entire balance</h3>
+    <pre><code>def is_fully_withdrawable_validator(
+    validator: Validator, balance: Gwei, epoch: Epoch
+) -> bool:
+    return (
+        has_eth1_withdrawal_credential(validator)
+        and validator.withdrawable_epoch <= epoch
+        and balance > 0
+    )</code></pre>
+    
+    <p>Three conditions:</p>
+    <ul>
+        <li>Has 0x01 credentials</li>
+        <li>Past <code>withdrawable_epoch</code> (exited + waited <code>MIN_VALIDATOR_WITHDRAWABILITY_DELAY</code>)</li>
+        <li>Non-zero balance remaining</li>
+    </ul>
+    
+    <h3>2. Partial Withdrawal — Active validator, excess above MAX_EFFECTIVE_BALANCE</h3>
+    <pre><code>def is_partially_withdrawable_validator(
+    validator: Validator, balance: Gwei
+) -> bool:
+    has_max_effective_balance = validator.effective_balance == MAX_EFFECTIVE_BALANCE
+    has_excess_balance = balance > MAX_EFFECTIVE_BALANCE
+    return (
+        has_eth1_withdrawal_credential(validator)
+        and has_max_effective_balance
+        and has_excess_balance
+    )</code></pre>
+    
+    <p>Rewards accumulate above 32 ETH. Partial withdrawals auto-sweep this excess.</p>
+    
+    <h2><span class="emoji">🔄</span> The Sweep Algorithm</h2>
+    
+    <p>Each block, the protocol:</p>
+    <ol>
+        <li>Starts at <code>next_withdrawal_validator_index</code></li>
+        <li>Checks up to 16,384 validators</li>
+        <li>Creates withdrawals for eligible validators (max 16)</li>
+        <li>Updates the sweep cursor</li>
+    </ol>
+    
+    <p>The core sweep logic (simplified):</p>
+    <pre><code>for _ in range(MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP):
+    if len(withdrawals) >= MAX_WITHDRAWALS_PER_PAYLOAD:
+        break
+        
+    validator = state.validators[validator_index]
+    balance = state.balances[validator_index]
+    
+    if is_fully_withdrawable_validator(validator, balance, epoch):
+        # Full withdrawal: entire balance
+        amount = balance
+    elif is_partially_withdrawable_validator(validator, balance):
+        # Partial withdrawal: excess above 32 ETH
+        amount = balance - MAX_EFFECTIVE_BALANCE
+    else:
+        amount = 0
+        
+    if amount > 0:
+        withdrawals.append(Withdrawal(...))
+    
+    validator_index = (validator_index + 1) % len(validators)</code></pre>
+    
+    <div class="insight">
+        With ~1M validators and 16,384 checked per block, a full sweep takes ~61 blocks (~12 minutes). Every validator with excess gets swept roughly every 12 minutes.
+    </div>
+    
+    <h2><span class="emoji">⚙️</span> process_withdrawals: CL Enforces, EL Executes</h2>
+    
+    <pre><code>def process_withdrawals(state: BeaconState, payload: ExecutionPayload) -> None:
+    expected = get_expected_withdrawals(state)
+    
+    # CL dictates exactly what withdrawals must appear
+    assert payload.withdrawals == expected.withdrawals
+    
+    # Deduct from CL balances
+    apply_withdrawals(state, expected.withdrawals)
+    
+    # Advance sweep cursor
+    update_next_withdrawal_index(state, expected.withdrawals)
+    update_next_withdrawal_validator_index(state, expected.withdrawals)</code></pre>
+    
+    <div class="insight">
+        <strong>Critical insight:</strong> Withdrawals are <em>deterministic</em>. Given the state, there's exactly one valid set of withdrawals. The EL <em>must</em> include exactly these withdrawals in the ExecutionPayload. Any deviation = invalid block.
+    </div>
+    
+    <h2><span class="emoji">🔑</span> BLSToExecutionChange: Converting 0x00 → 0x01</h2>
+    
+    <p>For validators with legacy 0x00 credentials:</p>
+    
+    <pre><code>class BLSToExecutionChange(Container):
+    validator_index: ValidatorIndex
+    from_bls_pubkey: BLSPubkey        # Must match hash in credentials
+    to_execution_address: ExecutionAddress</code></pre>
+    
+    <p>The processing logic:</p>
+    <pre><code>def process_bls_to_execution_change(
+    state: BeaconState, signed: SignedBLSToExecutionChange
+) -> None:
+    change = signed.message
+    validator = state.validators[change.validator_index]
+    
+    # Must currently have BLS credentials
+    assert validator.withdrawal_credentials[:1] == BLS_WITHDRAWAL_PREFIX
+    
+    # The BLS pubkey must match what's in the credentials
+    assert validator.withdrawal_credentials[1:] == hash(change.from_bls_pubkey)[1:]
+    
+    # Fork-agnostic domain (valid across all forks!)
+    domain = compute_domain(
+        DOMAIN_BLS_TO_EXECUTION_CHANGE,
+        genesis_validators_root=state.genesis_validators_root
+    )
+    signing_root = compute_signing_root(change, domain)
+    assert bls.Verify(change.from_bls_pubkey, signing_root, signed.signature)
+    
+    # Rewrite credentials to 0x01 format
+    validator.withdrawal_credentials = (
+        ETH1_ADDRESS_WITHDRAWAL_PREFIX + b"\x00" * 11 + change.to_execution_address
+    )</code></pre>
+    
+    <h2><span class="emoji">❓</span> Why This Way?</h2>
+    
+    <h3>Why deterministic withdrawals?</h3>
+    <ul>
+        <li>No withdrawal transactions = no gas wars, no MEV extraction</li>
+        <li>CL dictates, EL executes—clean separation of concerns</li>
+        <li>Validators can't front-run or time their withdrawals</li>
+    </ul>
+    
+    <h3>Why sweep instead of queue?</h3>
+    <ul>
+        <li>All eligible validators get processed eventually</li>
+        <li>No explicit "request partial withdrawal" operation needed</li>
+        <li>Simpler state: just a cursor, not a queue</li>
+    </ul>
+    
+    <h3>Why fork-agnostic domain for BLS changes?</h3>
+    <ul>
+        <li>A pre-signed BLSToExecutionChange remains valid forever</li>
+        <li>Validators could prepare these offline before Capella</li>
+        <li>Protects against key loss—sign it once, include it whenever</li>
+    </ul>
+    
+    <h3>Why 16,384 per sweep?</h3>
+    <ul>
+        <li>With 1M validators, full sweep ≈ 12 minutes</li>
+        <li>Bounded per-block computation</li>
+        <li>Still fast enough that excess doesn't accumulate</li>
+    </ul>
+    
+    <h2><span class="emoji">⚠️</span> Gotchas</h2>
+    
+    <ol>
+        <li><strong>Gwei not Wei</strong>: Withdrawal <code>amount</code> is in Gwei. EL must multiply by 10^9 when crediting.</li>
+        <li><strong>0x00 credentials are permanent until converted</strong>: If you lose the BLS key used to derive 0x00 credentials, that ETH is locked forever. No recovery mechanism.</li>
+        <li><strong>One-way conversion</strong>: 0x00 → 0x01 is irreversible. The EL address is permanent.</li>
+        <li><strong>Partial withdrawals require MAX_EFFECTIVE_BALANCE</strong>: If effective_balance < 32 ETH (e.g., slashed), no partial withdrawals even with excess.</li>
+        <li><strong>Cursor advancement</strong>: Even if a block has 16 withdrawals, cursor advances by actual validators checked—could be more than 16,384 in edge cases with many ineligible validators.</li>
+    </ol>
+    
+    <h2><span class="emoji">🔗</span> Connections</h2>
+    <ul>
+        <li><strong>Lesson 15 (Voluntary Exits)</strong>: Exit must complete before full withdrawal</li>
+        <li><strong>Lesson 16 (Slashing)</strong>: Slashed validators have <code>withdrawable_epoch</code> set to ~36 days out</li>
+        <li><strong>Lesson 21 (MaxEB/Electra)</strong>: Compounding credentials (0x02) change partial withdrawal behavior—excess above MAX_EFFECTIVE_BALANCE_ELECTRA</li>
+    </ul>
+    
+    <h2><span class="emoji">📊</span> Summary</h2>
+    
+    <p>Capella solved "ETH in, ETH out":</p>
+    
+    <table>
+        <tr><th>Feature</th><th>Mechanism</th></tr>
+        <tr><td>Full withdrawals</td><td>Exited + 0x01 + balance > 0</td></tr>
+        <tr><td>Partial withdrawals</td><td>Active + 0x01 + balance > 32 ETH</td></tr>
+        <tr><td>Credential conversion</td><td>BLSToExecutionChange operation</td></tr>
+        <tr><td>Execution</td><td>Deterministic, included in ExecutionPayload</td></tr>
+    </table>
+    
+    <div class="insight">
+        <strong>The elegance:</strong> No withdrawal transactions. The protocol just... pushes money out. The sweep cursor continuously cycles through all validators, skimming excess and emptying exited balances.
+    </div>
+    
+    <p><strong>Historical note:</strong> When Capella activated (April 2023), ~1.1M ETH in accumulated rewards was swept in the first few hours. The system worked exactly as specified.</p>
+    
+    <hr>
+    <p><em>Tomorrow: Lesson 20 — Consolidations (Electra): Merging validators to enable MaxEB without fragmenting stake</em></p>
+    
+    <footer>
+        <p>Ethereum Consensus Specs Curriculum — Lesson 19 of 100</p>
+        <p>Generated: 2026-02-21</p>
+    </footer>
+</body>
+</html>

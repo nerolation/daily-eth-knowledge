@@ -1,0 +1,17 @@
+{
+  "lesson": 19,
+  "title": "Withdrawals (Capella)",
+  "slug": "withdrawals-capella",
+  "date": "2026-02-21",
+  "status": "pending",
+  "spec_refs": [
+    "capella/beacon-chain.md"
+  ],
+  "topics": [
+    "withdrawal credentials",
+    "BLS-to-execution change",
+    "automatic sweep",
+    "full withdrawals",
+    "partial withdrawals"
+  ]
+}
