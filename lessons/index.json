@@ -1,5 +1,11 @@
 [
   {
+    "file": "019-withdrawals-capella.html",
+    "title": "Withdrawals (Capella)",
+    "date": "2026-02-21",
+    "number": 19
+  },
+  {
     "file": "018-attester-slashing.html",
     "title": "Attester Slashing",
     "date": "2026-02-20",
