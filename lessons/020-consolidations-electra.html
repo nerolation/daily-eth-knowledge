@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 20: Consolidations (Electra)</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+            --green: #3fb950;
+            --yellow: #d29922;
+            --red: #f85149;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code { padding: 0; }
+        .highlight { color: var(--green); }
+        .warning { color: var(--yellow); }
+        .critical { color: var(--red); }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.5rem;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .callout {
+            background: var(--code-bg);
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 20: Consolidations (Electra)</h1>
+    <p><strong>Date:</strong> February 23, 2026</p>
+    <p><strong>Spec:</strong> <code>electra/beacon-chain.md</code> → Consolidation processing</p>
+    
+    <h2>💡 Why Consolidations Exist</h2>
+    <p>
+        Consolidations are the core mechanism enabling <strong>EIP-7251 (MaxEB)</strong>. Without them, 
+        operators running multiple 32 ETH validators would have no way to merge them into larger validators 
+        that can accumulate up to 2048 ETH effective balance.
+    </p>
+    
+    <p>The consolidation mechanism serves two purposes:</p>
+    <ol>
+        <li><strong>Validator merging:</strong> Move stake from a source validator to a target validator</li>
+        <li><strong>Credential upgrade:</strong> Switch from 0x01 (ETH1) to 0x02 (compounding) withdrawal credentials</li>
+    </ol>
+    
+    <div class="callout">
+        <strong>Key insight:</strong> Only validators with <code>0x02</code> (compounding) credentials can have 
+        effective balance above 32 ETH. Consolidation is how you get there.
+    </div>
+
+    <h2>🔍 The Request Flow</h2>
+    
+    <p>Consolidations are <strong>execution-layer triggered</strong> (EIP-7251). The flow:</p>
+    
+    <pre><code>EL Contract → ExecutionPayload.execution_requests.consolidations
+    → CL process_consolidation_request()
+    → state.pending_consolidations queue
+    → process_pending_consolidations() at epoch boundary
+    → Balance transfer complete</code></pre>
+
+    <h3>ConsolidationRequest Container</h3>
+    <pre><code class="python">class ConsolidationRequest(Container):
+    source_address: ExecutionAddress  # Must match source's withdrawal creds
+    source_pubkey: BLSPubkey         # Validator to exit
+    target_pubkey: BLSPubkey         # Validator receiving the balance</code></pre>
+    
+    <p>The <code>source_address</code> must match the withdrawal credentials of the source validator—this 
+    proves authorization. Only the withdrawal address owner can consolidate their validator.</p>
+
+    <h3>PendingConsolidation Container</h3>
+    <pre><code class="python">class PendingConsolidation(Container):
+    source_index: ValidatorIndex
+    target_index: ValidatorIndex</code></pre>
+    
+    <p>Simple pair of indices. The balance amount isn't stored—it's computed at processing time from 
+    the source's current state.</p>
+
+    <h2>🛠 Consolidation Churn</h2>
+    
+    <p>Consolidations have their <strong>own separate churn limit</strong>, distinct from activation/exit churn:</p>
+    
+    <pre><code class="python">def get_consolidation_churn_limit(state: BeaconState) -> Gwei:
+    return get_balance_churn_limit(state) - get_activation_exit_churn_limit(state)</code></pre>
+
+    <p>This means:</p>
+    <ul>
+        <li>Total balance churn = <code>max(128 ETH, total_active_balance / 65536)</code></li>
+        <li>Activation/Exit churn = <code>min(256 ETH, total_balance_churn)</code></li>
+        <li>Consolidation churn = the remainder</li>
+    </ul>
+
+    <table>
+        <tr>
+            <th>Total Active Balance</th>
+            <th>Balance Churn</th>
+            <th>Exit Churn</th>
+            <th>Consolidation Churn</th>
+        </tr>
+        <tr>
+            <td>&lt;8.4M ETH</td>
+            <td>128 ETH</td>
+            <td>128 ETH</td>
+            <td class="warning">0 ETH (blocked!)</td>
+        </tr>
+        <tr>
+            <td>16.7M ETH</td>
+            <td>256 ETH</td>
+            <td>256 ETH</td>
+            <td class="warning">0 ETH (blocked!)</td>
+        </tr>
+        <tr>
+            <td>33.5M ETH (current)</td>
+            <td>512 ETH</td>
+            <td>256 ETH</td>
+            <td class="highlight">256 ETH</td>
+        </tr>
+    </table>
+
+    <div class="callout">
+        <strong>⚠️ Critical edge case:</strong> If <code>get_consolidation_churn_limit(state) &lt;= MIN_ACTIVATION_BALANCE</code>, 
+        consolidation requests are silently ignored! This protects against consolidations when the network is too small.
+    </div>
+
+    <h2>🔧 process_consolidation_request</h2>
+    
+    <p>The core processing function handles two cases:</p>
+
+    <h3>Case 1: Switch to Compounding (source == target)</h3>
+    <pre><code class="python">if is_valid_switch_to_compounding_request(state, consolidation_request):
+    # Just upgrade credentials, no balance movement
+    switch_to_compounding_validator(state, source_index)
+    return</code></pre>
+    
+    <p>What <code>switch_to_compounding_validator</code> does:</p>
+    <pre><code class="python">def switch_to_compounding_validator(state: BeaconState, index: ValidatorIndex) -> None:
+    validator = state.validators[index]
+    # Change 0x01... to 0x02...
+    validator.withdrawal_credentials = (
+        COMPOUNDING_WITHDRAWAL_PREFIX + validator.withdrawal_credentials[1:]
+    )
+    queue_excess_active_balance(state, index)</code></pre>
+
+    <p>The <code>queue_excess_active_balance</code> is subtle: it takes any balance above 32 ETH and 
+    queues it as a pending deposit back to the same validator. This handles the case where you had 
+    33 ETH before switching—that extra 1 ETH needs to be "re-deposited" to count toward your new 
+    higher effective balance.</p>
+
+    <h3>Case 2: Full Consolidation (source → target)</h3>
+    
+    <p>Validation checks for full consolidation:</p>
+    <pre><code class="python"># Source must have execution credentials (0x01 or 0x02)
+has_correct_credential = has_execution_withdrawal_credential(source_validator)
+# Authorization: source address must match
+is_correct_source_address = (
+    source_validator.withdrawal_credentials[12:] == consolidation_request.source_address
+)
+
+# Target MUST have compounding credentials (0x02)
+if not has_compounding_withdrawal_credential(target_validator):
+    return
+
+# Both must be active, neither can be exiting
+if source_validator.exit_epoch != FAR_FUTURE_EPOCH:
+    return
+if target_validator.exit_epoch != FAR_FUTURE_EPOCH:
+    return
+
+# Source must have been active for SHARD_COMMITTEE_PERIOD (~27 hours)
+if current_epoch < source_validator.activation_epoch + SHARD_COMMITTEE_PERIOD:
+    return
+
+# No pending withdrawals allowed on source
+if get_pending_balance_to_withdraw(state, source_index) > 0:
+    return</code></pre>
+
+    <p>If all checks pass:</p>
+    <pre><code class="python"># Initiate exit for source (uses consolidation churn, not exit churn!)
+source_validator.exit_epoch = compute_consolidation_epoch_and_update_churn(
+    state, source_validator.effective_balance
+)
+source_validator.withdrawable_epoch = Epoch(
+    source_validator.exit_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY
+)
+
+# Queue the consolidation for epoch processing
+state.pending_consolidations.append(
+    PendingConsolidation(source_index=source_index, target_index=target_index)
+)</code></pre>
+
+    <h2>⏰ Epoch Processing</h2>
+    
+    <p>At each epoch boundary, <code>process_pending_consolidations</code> handles ready consolidations:</p>
+    
+    <pre><code class="python">def process_pending_consolidations(state: BeaconState) -> None:
+    next_epoch = Epoch(get_current_epoch(state) + 1)
+    next_pending_consolidation = 0
+    
+    for pending_consolidation in state.pending_consolidations:
+        source_validator = state.validators[pending_consolidation.source_index]
+        
+        # Skip slashed sources (they can't consolidate)
+        if source_validator.slashed:
+            next_pending_consolidation += 1
+            continue
+        
+        # Wait until source is withdrawable
+        if source_validator.withdrawable_epoch > next_epoch:
+            break
+        
+        # Calculate what to move (min of balance and effective_balance)
+        source_effective_balance = min(
+            state.balances[pending_consolidation.source_index],
+            source_validator.effective_balance
+        )
+        
+        # Do the transfer
+        decrease_balance(state, pending_consolidation.source_index, source_effective_balance)
+        increase_balance(state, pending_consolidation.target_index, source_effective_balance)
+        
+        next_pending_consolidation += 1
+    
+    # Remove processed consolidations
+    state.pending_consolidations = state.pending_consolidations[next_pending_consolidation:]</code></pre>
+
+    <h2>❓ Why This Design?</h2>
+    
+    <h3>Why separate consolidation churn?</h3>
+    <p>
+        If consolidations shared the exit queue, a coordinated consolidation event could delay 
+        legitimate exits. Separate churn ensures consolidations (an optimization) can't interfere 
+        with exits (a security mechanism).
+    </p>
+    
+    <h3>Why target must be 0x02?</h3>
+    <p>
+        If target had 0x01 credentials, the received balance above 32 ETH would be immediately 
+        withdrawable but not stakeable. The consolidation would effectively become a partial exit.
+        Requiring 0x02 ensures the balance actually compounds.
+    </p>
+    
+    <h3>Why wait for withdrawable_epoch?</h3>
+    <p>
+        The source validator is exiting. If we moved funds immediately, the source could be slashed 
+        between consolidation request and actual exit, creating accounting issues. Waiting until 
+        <code>withdrawable_epoch</code> ensures all slashing windows have passed.
+    </p>
+    
+    <h3>Why no pending withdrawals on source?</h3>
+    <p>
+        Pending partial withdrawals create a commitment about future balance. Allowing consolidation 
+        with pending withdrawals would create conflicting claims on the same funds.
+    </p>
+
+    <h2>⚠️ Gotchas</h2>
+    
+    <ul>
+        <li><span class="warning">Consolidation churn can be zero</span> if total stake is low—requests silently fail</li>
+        <li><span class="warning">Slashed sources</span> have their consolidation skipped but still removed from queue</li>
+        <li><span class="warning">The balance transferred</span> is <code>min(balance, effective_balance)</code>, not just balance</li>
+        <li><span class="warning">0x00 (BLS) credentials</span> cannot consolidate—must switch to 0x01 first via BLSToExecutionChange</li>
+        <li><span class="warning">Queue limit:</span> <code>PENDING_CONSOLIDATIONS_LIMIT = 262,144</code>—requests fail when full</li>
+    </ul>
+
+    <h2>🔗 Connections</h2>
+    
+    <ul>
+        <li><strong>EIP-7251 (MaxEB):</strong> Consolidations are the upgrade path to variable effective balance</li>
+        <li><strong>EIP-7002 (EL exits):</strong> Uses same ExecutionRequests pattern</li>
+        <li><strong>Lesson 19 (Withdrawals):</strong> Consolidation interacts with pending_partial_withdrawals</li>
+        <li><strong>Lesson 14 (Churn):</strong> Consolidation churn is derived from base churn limits</li>
+        <li><strong>Lesson 15 (Exits):</strong> Source validator effectively exits during consolidation</li>
+    </ul>
+
+    <h2>📖 Summary</h2>
+    
+    <p>Consolidations enable the transition to MaxEB by providing two operations:</p>
+    <ol>
+        <li><strong>Credential switch:</strong> 0x01 → 0x02 (same validator, enables compounding)</li>
+        <li><strong>Validator merge:</strong> Exit source, transfer balance to compounding target</li>
+    </ol>
+    
+    <p>The mechanism uses separate churn to avoid impacting exits, requires target to be 0x02 to 
+    ensure funds compound, and waits for the source's withdrawable epoch before transferring to 
+    handle slashing edge cases correctly.</p>
+
+    <p style="text-align: center; margin-top: 2rem; color: var(--accent);">
+        ⚙️ <em>Tomorrow: Lesson 21 — MaxEB and Variable Effective Balance</em>
+    </p>
+</body>
+</html>
