@@ -1,5 +1,11 @@
 [
   {
+    "file": "022-execution-layer-requests.html",
+    "title": "Execution Layer Requests (Electra)",
+    "date": "2026-02-25",
+    "number": 22
+  },
+  {
     "file": "021-maxeb-variable-effective-balance.html",
     "title": "MaxEB - Variable Effective Balance",
     "date": "2026-02-24",

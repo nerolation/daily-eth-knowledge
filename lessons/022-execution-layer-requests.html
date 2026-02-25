@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 22: Execution Layer Requests (Electra)</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; background: #0d1117; color: #c9d1d9; }
+        h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }
+        h2 { color: #79c0ff; margin-top: 2rem; }
+        h3 { color: #a5d6ff; }
+        code { background: #161b22; padding: 0.2em 0.4em; border-radius: 3px; font-family: 'Fira Code', monospace; }
+        pre { background: #161b22; padding: 1rem; border-radius: 6px; overflow-x: auto; border: 1px solid #30363d; }
+        pre code { padding: 0; background: none; }
+        .highlight { color: #7ee787; }
+        .warning { color: #f0883e; }
+        .info { background: #1f2937; border-left: 4px solid #58a6ff; padding: 1rem; margin: 1rem 0; }
+        table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+        th, td { border: 1px solid #30363d; padding: 0.5rem; text-align: left; }
+        th { background: #161b22; }
+        .eip-tag { background: #238636; color: white; padding: 0.2em 0.5em; border-radius: 3px; font-size: 0.85em; }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 22: Execution Layer Requests (Electra)</h1>
+    <p><em>From gossip to smart contracts — the unification of validator operations.</em></p>
+
+    <h2>🔍 Spec Location</h2>
+    <p><code>electra/beacon-chain.md</code> → ExecutionRequests, process_operations</p>
+
+    <h2>💡 Core Concept</h2>
+    <p>Electra introduces a paradigm shift: validator operations (deposits, withdrawals, consolidations) now flow <strong>from the execution layer</strong> via smart contracts, rather than through the gossip network.</p>
+    
+    <p>This is enabled by three EIPs working together:</p>
+    <ul>
+        <li><span class="eip-tag">EIP-6110</span> On-chain deposit supply (deposits via EL)</li>
+        <li><span class="eip-tag">EIP-7002</span> Execution-layer triggerable exits/withdrawals</li>
+        <li><span class="eip-tag">EIP-7251</span> MaxEB enables consolidations</li>
+    </ul>
+
+    <p>The unifying structure is <code>ExecutionRequests</code>:</p>
+    <pre><code class="language-python">class ExecutionRequests(Container):
+    deposits: List[DepositRequest, MAX_DEPOSIT_REQUESTS_PER_PAYLOAD]        # 8,192 max
+    withdrawals: List[WithdrawalRequest, MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD]  # 16 max
+    consolidations: List[ConsolidationRequest, MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD]  # 2 max</code></pre>
+
+    <h2>🛠 The Three Request Types</h2>
+
+    <h3>1. DepositRequest (EIP-6110)</h3>
+    <pre><code class="language-python">class DepositRequest(Container):
+    pubkey: BLSPubkey
+    withdrawal_credentials: Bytes32
+    amount: Gwei
+    signature: BLSSignature
+    index: uint64  # Sequential index from deposit contract</code></pre>
+    <p class="info">Why it matters: Eliminates the Eth1 follow distance delay (~13 hours). Deposits appear in the same block where the EL transaction was included.</p>
+
+    <h3>2. WithdrawalRequest (EIP-7002)</h3>
+    <pre><code class="language-python">class WithdrawalRequest(Container):
+    source_address: ExecutionAddress  # Must match withdrawal credentials[12:]
+    validator_pubkey: BLSPubkey
+    amount: Gwei  # 0 = full exit, >0 = partial withdrawal</code></pre>
+    <p>The magic constant: <code>FULL_EXIT_REQUEST_AMOUNT = 0</code> signals a full exit.</p>
+
+    <h3>3. ConsolidationRequest (EIP-7251)</h3>
+    <pre><code class="language-python">class ConsolidationRequest(Container):
+    source_address: ExecutionAddress
+    source_pubkey: BLSPubkey
+    target_pubkey: BLSPubkey</code></pre>
+    <p>When <code>source_pubkey == target_pubkey</code>, it's a "switch to compounding" request (0x01 → 0x02 credentials).</p>
+
+    <h2>🔗 The EL↔CL Flow</h2>
+    <pre><code>EL Smart Contract → ExecutionPayload → Engine API → CL process_operations</code></pre>
+    <ol>
+        <li>User calls system contract on EL (deposit/withdrawal/consolidation)</li>
+        <li>EL includes requests in block via EIP-7685 encoding</li>
+        <li>Engine API's <code>NewPayloadRequest</code> includes <code>execution_requests</code></li>
+        <li>CL validates block hash includes requests list</li>
+        <li>CL processes each request type in <code>process_operations</code></li>
+    </ol>
+
+    <table>
+        <tr><th>Type Prefix</th><th>Request Type</th></tr>
+        <tr><td><code>0x00</code></td><td>Deposit</td></tr>
+        <tr><td><code>0x01</code></td><td>Withdrawal</td></tr>
+        <tr><td><code>0x02</code></td><td>Consolidation</td></tr>
+    </table>
+
+    <h3>The Eth1 Bridge Sunset</h3>
+    <pre><code class="language-python">def process_operations(state, body):
+    # Disable former deposit mechanism once all prior deposits processed
+    eth1_deposit_index_limit = min(
+        state.eth1_data.deposit_count,
+        state.deposit_requests_start_index
+    )
+    if state.eth1_deposit_index < eth1_deposit_index_limit:
+        assert len(body.deposits) == min(
+            MAX_DEPOSITS, eth1_deposit_index_limit - state.eth1_deposit_index
+        )
+    else:
+        assert len(body.deposits) == 0  # Old deposits disabled!</code></pre>
+    <p>Once <code>deposit_requests_start_index</code> is set (on first EIP-6110 deposit), the old <code>deposits</code> field gradually drains to zero.</p>
+
+    <h2>🛠 Processing Logic Deep Dive</h2>
+
+    <h3>process_deposit_request</h3>
+    <pre><code class="language-python">def process_deposit_request(state, deposit_request):
+    # Set start index on first deposit request ever
+    if state.deposit_requests_start_index == UNSET_DEPOSIT_REQUESTS_START_INDEX:
+        state.deposit_requests_start_index = deposit_request.index
+    
+    # Queue it for epoch processing
+    state.pending_deposits.append(
+        PendingDeposit(
+            pubkey=deposit_request.pubkey,
+            withdrawal_credentials=deposit_request.withdrawal_credentials,
+            amount=deposit_request.amount,
+            signature=deposit_request.signature,
+            slot=state.slot,  # Non-GENESIS_SLOT marks it as EL request
+        )
+    )</code></pre>
+    <p class="info">No signature verification here! That happens in <code>process_pending_deposits</code> at epoch boundary.</p>
+
+    <h3>process_withdrawal_request</h3>
+    <pre><code class="language-python">def process_withdrawal_request(state, withdrawal_request):
+    amount = withdrawal_request.amount
+    is_full_exit = amount == FULL_EXIT_REQUEST_AMOUNT  # amount == 0
+    
+    # Verify: pubkey exists, credential match, active, not exiting
+    # ...
+    
+    if is_full_exit:
+        if pending_balance_to_withdraw == 0:
+            initiate_validator_exit(state, index)
+        return
+    
+    # Partial withdrawal: requires compounding credentials (0x02)
+    if has_compounding_withdrawal_credential(validator):
+        to_withdraw = min(
+            state.balances[index] - MIN_ACTIVATION_BALANCE - pending_balance,
+            amount
+        )
+        exit_queue_epoch = compute_exit_epoch_and_update_churn(state, to_withdraw)
+        state.pending_partial_withdrawals.append(
+            PendingPartialWithdrawal(
+                validator_index=index,
+                amount=to_withdraw,
+                withdrawable_epoch=exit_queue_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
+            )
+        )</code></pre>
+    <p class="info">Key insight: Partial withdrawals <strong>consume churn</strong> just like exits. Why? Because withdrawing 100 ETH from a 2048 ETH validator affects the stake distribution.</p>
+
+    <h3>process_consolidation_request — Two Modes</h3>
+    <pre><code class="language-python">def process_consolidation_request(state, consolidation_request):
+    # Mode 1: Switch to compounding (source == target)
+    if is_valid_switch_to_compounding_request(state, consolidation_request):
+        switch_to_compounding_validator(state, source_index)
+        return
+    
+    # Mode 2: Actual consolidation (source != target)
+    # - Target must have compounding credentials (0x02)
+    # - Source exits and pending consolidation queued
+    source_validator.exit_epoch = compute_consolidation_epoch_and_update_churn(
+        state, source_validator.effective_balance
+    )
+    state.pending_consolidations.append(
+        PendingConsolidation(source_index, target_index)
+    )</code></pre>
+
+    <h2>⚠️ Gotchas</h2>
+    <ol>
+        <li><strong>Authorization model</strong>: For withdrawals/consolidations, <code>source_address</code> must match <code>withdrawal_credentials[12:]</code>. The EL contract verifies <code>msg.sender</code>.</li>
+        <li><strong>Pending balance check</strong>: Can't exit if <code>get_pending_balance_to_withdraw(state, index) > 0</code>. Must wait for pending partials to clear.</li>
+        <li><strong>Churn competition</strong>: Exits, partial withdrawals, and consolidations all compete for churn capacity. Consolidations have their own limit: <code>get_consolidation_churn_limit() = get_balance_churn_limit() - get_activation_exit_churn_limit()</code>.</li>
+        <li><strong>Queue overflow</strong>: If <code>pending_partial_withdrawals</code> is full (2^27 entries), partial withdrawal requests are silently ignored. Only full exits proceed.</li>
+    </ol>
+
+    <h2>❓ Why This Way</h2>
+    <p>The old model required:</p>
+    <ul>
+        <li>Gossip network for voluntary exits (unreliable)</li>
+        <li>~13 hour eth1 follow distance for deposits (slow)</li>
+        <li>No way to trigger exits from smart contracts (inflexible)</li>
+    </ul>
+
+    <p>The new model enables:</p>
+    <ul>
+        <li>Staking pools with contract-controlled exits</li>
+        <li>Instant deposit visibility</li>
+        <li>Unified security model via EL transaction authorization</li>
+        <li>Future composability (restaking protocols can trigger exits)</li>
+    </ul>
+
+    <h2>🔗 Connections</h2>
+    <ul>
+        <li><strong>Lesson 13</strong>: Deposits and the Deposit Contract (the old way)</li>
+        <li><strong>Lesson 19</strong>: Withdrawals (Capella) — automatic sweep, pre-EL-requests</li>
+        <li><strong>Lesson 20</strong>: Consolidations (Electra) — validator merging</li>
+        <li><strong>Lesson 21</strong>: MaxEB — why compounding credentials matter</li>
+    </ul>
+
+    <footer style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #30363d; color: #8b949e;">
+        <p>Lesson 22 of 100 | Consensus Specs Curriculum | February 25, 2026</p>
+    </footer>
+</body>
+</html>
