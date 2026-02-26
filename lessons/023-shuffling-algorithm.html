@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 23: The Shuffling Algorithm | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into compute_shuffled_index: the swap-or-not algorithm that assigns validators to committees unpredictably but deterministically.">
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <nav class="lesson-nav">
+        <a href="022-execution-layer-requests.html">← Previous</a>
+        <a href="../index.html">Index</a>
+        <a href="024-beacon-committees.html">Next →</a>
+    </nav>
+
+    <article class="lesson">
+        <header>
+            <div class="lesson-meta">
+                <span class="lesson-number">Lesson 23</span>
+                <span class="module">Module 3: Committees and Shuffling (1/8)</span>
+                <time datetime="2026-02-26">February 26, 2026</time>
+            </div>
+            <h1>The Shuffling Algorithm</h1>
+            <p class="subtitle">compute_shuffled_index, swap-or-not, and why 90 rounds</p>
+        </header>
+
+        <section class="spec-location">
+            <h2>📍 Spec Location</h2>
+            <p><code>phase0/beacon-chain.md</code> → <code>compute_shuffled_index</code></p>
+        </section>
+
+        <section class="core-concept">
+            <h2>💡 Core Concept</h2>
+            <p>The shuffling algorithm is how Ethereum consensus assigns validators to committees unpredictably but deterministically. Every validator needs to know their duties, but no one should be able to predict assignments far in advance (enables attacks).</p>
+            
+            <p>The algorithm is called <strong>swap-or-not</strong> — a cryptographic construction that shuffles by iteratively deciding whether each index should swap with another position.</p>
+            
+            <div class="key-insight">
+                <strong>Key insight:</strong> Rather than shuffling an entire array (expensive), we compute the shuffled position of a <em>single</em> index on-demand. This is crucial for light clients and efficient implementations.
+            </div>
+        </section>
+
+        <section class="code-section">
+            <h2>🛠 The Code</h2>
+            <pre><code class="language-python">SHUFFLE_ROUND_COUNT = 90  # Why 90? We'll get there.
+
+def compute_shuffled_index(
+    index: uint64, 
+    index_count: uint64, 
+    seed: Bytes32
+) -> uint64:
+    """
+    Return the shuffled index corresponding to ``seed`` 
+    (and ``index_count``).
+    """
+    assert index < index_count
+
+    # Swap or not (https://link.springer.com/content/pdf/10.1007%2F978-3-642-32009-5_1.pdf)
+    # See the 'generalized domain' algorithm on page 3
+    for current_round in range(SHUFFLE_ROUND_COUNT):
+        # 1. Compute pivot for this round
+        pivot = bytes_to_uint64(
+            hash(seed + uint_to_bytes(uint8(current_round)))[0:8]
+        ) % index_count
+        
+        # 2. Compute the "flip" position
+        flip = (pivot + index_count - index) % index_count
+        
+        # 3. Get deterministic bit to decide swap
+        position = max(index, flip)
+        source = hash(
+            seed + 
+            uint_to_bytes(uint8(current_round)) + 
+            uint_to_bytes(uint32(position // 256))
+        )
+        byte = uint8(source[(position % 256) // 8])
+        bit = (byte >> (position % 8)) % 2
+        
+        # 4. Swap or not
+        index = flip if bit else index
+
+    return index</code></pre>
+        </section>
+
+        <section class="breakdown">
+            <h2>🔬 Step-by-Step Breakdown</h2>
+            <p>Each round does this:</p>
+
+            <h3>1. Pivot calculation</h3>
+            <pre><code>pivot = hash(seed || round)[0:8] % index_count</code></pre>
+            <p>The pivot is a random position in [0, index_count) derived from the seed and round number.</p>
+
+            <h3>2. Flip calculation</h3>
+            <pre><code>flip = (pivot + index_count - index) % index_count</code></pre>
+            <p>This computes the "mirror" position of <code>index</code> around the pivot. If index = pivot + k, then flip = pivot - k (mod index_count).</p>
+
+            <h3>3. Bit extraction</h3>
+            <pre><code>position = max(index, flip)  # Ensures both sides compute same bit
+source = hash(seed || round || position // 256)
+bit = (source[position % 256 // 8] >> (position % 8)) % 2</code></pre>
+            <p>We need a deterministic bit to decide the swap. Using <code>max(index, flip)</code> ensures both positions looking at each other get the <strong>same</strong> bit (critical for consistency).</p>
+
+            <h3>4. Conditional swap</h3>
+            <pre><code>index = flip if bit else index</code></pre>
+            <p>If bit=1, swap positions. If bit=0, stay put.</p>
+        </section>
+
+        <section class="rationale">
+            <h2>❓ Why 90 Rounds?</h2>
+            <p>The swap-or-not algorithm achieves <strong>perfect uniformity</strong> after enough rounds. The original paper proves:</p>
+            <ul>
+                <li>For n elements, O(log n) rounds suffice for statistical closeness to uniform</li>
+                <li>90 rounds provides ~2<sup>-40</sup> statistical distance for any realistic validator count</li>
+            </ul>
+            
+            <p>With ~1M validators, log₂(1M) ≈ 20. Why 90 then? <strong>Security margin.</strong> The spec uses 90 to ensure the shuffle is indistinguishable from random even under adversarial analysis.</p>
+            
+            <pre><code>SHUFFLE_ROUND_COUNT = 90  # Provides ~40-bit security margin</code></pre>
+        </section>
+
+        <section class="design-rationale">
+            <h2>🎨 Why This Design?</h2>
+            
+            <h3>Alternative 1: Fisher-Yates shuffle</h3>
+            <ul>
+                <li>Shuffles entire array: O(n) time, O(n) space</li>
+                <li>Problem: Can't compute single index without full shuffle</li>
+                <li>Light clients would need to process all validators</li>
+            </ul>
+
+            <h3>Alternative 2: Hash-based random assignment</h3>
+            <pre><code>def naive_assignment(index, seed, committee_count):
+    return hash(seed || index) % committee_count</code></pre>
+            <ul>
+                <li>Problem: Uneven distribution (birthday paradox creates variance)</li>
+                <li>Some committees could be 50% larger/smaller than target</li>
+            </ul>
+
+            <h3>Swap-or-not advantages:</h3>
+            <ol>
+                <li><strong>Single-index computation:</strong> O(90) hashes per index</li>
+                <li><strong>Perfect uniformity:</strong> Provably uniform permutation</li>
+                <li><strong>Reversibility:</strong> Run backwards with same seed to unshuffle</li>
+                <li><strong>Deterministic:</strong> Same seed → same permutation everywhere</li>
+            </ol>
+        </section>
+
+        <section class="connections">
+            <h2>🔗 Where Shuffling Gets Used</h2>
+            <pre><code class="language-python">def compute_committee(indices, seed, index, count):
+    start = (len(indices) * index) // count
+    end = (len(indices) * (index + 1)) // count
+    return [
+        indices[compute_shuffled_index(i, len(indices), seed)]
+        for i in range(start, end)
+    ]</code></pre>
+
+            <p>The shuffle distributes validators across committees. Each committee gets a contiguous range of the shuffled indices.</p>
+
+            <h3>The seed comes from:</h3>
+            <pre><code class="language-python">def get_seed(state, epoch, domain_type):
+    mix = get_randao_mix(
+        state, 
+        epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1
+    )
+    return hash(domain_type + uint_to_bytes(epoch) + mix)</code></pre>
+            <p>RANDAO mix from a past epoch → deterministic seed → deterministic shuffle.</p>
+        </section>
+
+        <section class="gotchas">
+            <h2>⚠️ Gotchas & Edge Cases</h2>
+            
+            <h3>1. position = max(index, flip)</h3>
+            <p>This is subtle but critical. Both index=A and index=B (where B is A's flip) must see the same bit. Using <code>max()</code> ensures they hash the same <code>position</code>.</p>
+
+            <h3>2. Hash caching matters</h3>
+            <p>Each round computes:</p>
+            <ul>
+                <li>1 hash for pivot</li>
+                <li>1 hash for the bit source (per 256 positions)</li>
+            </ul>
+            <p>Naive implementation: 90 × 2 = 180 hashes per index.<br>
+            Optimized: Cache pivot hashes, batch position hashes → ~90-100 hashes.</p>
+
+            <h3>3. Empty committee edge case</h3>
+            <pre><code>assert index < index_count  # Fails if index_count = 0</code></pre>
+            <p>The spec handles this upstream—committees always have at least 1 validator.</p>
+        </section>
+
+        <section class="security">
+            <h2>🎯 Security Properties</h2>
+            <table>
+                <thead>
+                    <tr><th>Property</th><th>Guarantee</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Uniformity</td><td>Statistical distance &lt; 2<sup>-40</sup> from random</td></tr>
+                    <tr><td>Determinism</td><td>Same (seed, index, count) → same result</td></tr>
+                    <tr><td>Pre-image resistance</td><td>Can't find seed that produces target shuffle</td></tr>
+                    <tr><td>Lookahead</td><td>MIN_SEED_LOOKAHEAD (1 epoch) before duties known</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="further-reading">
+            <h2>📖 Further Reading</h2>
+            <ul>
+                <li>Original paper: <a href="https://link.springer.com/content/pdf/10.1007%2F978-3-642-32009-5_1.pdf">"Swap-or-not" shuffle</a> (Hoang et al.)</li>
+                <li><code>phase0/beacon-chain.md</code> → <code>compute_committee</code>, <code>get_beacon_committee</code></li>
+                <li>Tomorrow: <a href="024-beacon-committees.html">Lesson 24 — Beacon Committees</a></li>
+            </ul>
+        </section>
+
+        <footer class="lesson-footer">
+            <p class="progress">Day 23/100 — Module 3: Committees and Shuffling</p>
+        </footer>
+    </article>
+
+    <nav class="lesson-nav bottom">
+        <a href="022-execution-layer-requests.html">← Previous</a>
+        <a href="../index.html">Index</a>
+        <a href="024-beacon-committees.html">Next →</a>
+    </nav>
+</body>
+</html>

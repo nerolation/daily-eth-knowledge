@@ -1,5 +1,11 @@
 [
   {
+    "file": "023-shuffling-algorithm.html",
+    "title": "The Shuffling Algorithm",
+    "date": "2026-02-26",
+    "number": 23
+  },
+  {
     "file": "022-execution-layer-requests.html",
     "title": "Execution Layer Requests (Electra)",
     "date": "2026-02-25",
