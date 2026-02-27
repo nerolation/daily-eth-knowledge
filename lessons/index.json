@@ -1,5 +1,11 @@
 [
   {
+    "file": "024-beacon-committees.html",
+    "title": "Beacon Committees",
+    "date": "2026-02-27",
+    "number": 24
+  },
+  {
     "file": "023-shuffling-algorithm.html",
     "title": "The Shuffling Algorithm",
     "date": "2026-02-26",
