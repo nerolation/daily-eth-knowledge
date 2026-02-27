@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 24: Beacon Committees | Ethereum Consensus Specs</title>
+    <meta name="description" content="How validators are assigned to committees using shuffling - get_beacon_committee, compute_committee, TARGET_COMMITTEE_SIZE, and committee security analysis.">
+    <meta name="keywords" content="ethereum, consensus, beacon committees, validator assignment, shuffling, TARGET_COMMITTEE_SIZE">
+    <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+    <nav class="lesson-nav">
+        <a href="023-shuffling-algorithm.html" class="prev">← Lesson 23: Shuffling Algorithm</a>
+        <a href="../index.html" class="home">📚 Course Index</a>
+        <a href="025-proposer-selection.html" class="next">Lesson 25: Proposer Selection →</a>
+    </nav>
+
+    <article class="lesson">
+        <header>
+            <div class="lesson-meta">
+                <span class="lesson-number">Lesson 24</span>
+                <span class="module">Module 3: Committees and Shuffling</span>
+            </div>
+            <h1>Beacon Committees</h1>
+            <p class="subtitle">How validators are assigned to attest each slot</p>
+        </header>
+
+        <section class="overview">
+            <h2>📚 Overview</h2>
+            <p>In the previous lesson, we learned how <code>compute_shuffled_index</code> creates an unpredictable permutation of validators. Today we see how that shuffle becomes <strong>committee assignments</strong>.</p>
+            
+            <div class="spec-ref">
+                <strong>Spec Reference:</strong> 
+                <a href="https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#get_beacon_committee">phase0/beacon-chain.md → get_beacon_committee</a>,
+                <a href="https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#get_committee_count_per_slot">get_committee_count_per_slot</a>
+            </div>
+        </section>
+
+        <section class="content">
+            <h2>🎯 Core Problem</h2>
+            <p>Every slot, validators need to attest to the head of the chain. But with ~1M validators, you can't have everyone attest to everything. The solution: divide validators into <strong>committees</strong>—small groups that attest together.</p>
+            
+            <p>The committee system must satisfy:</p>
+            <ol>
+                <li><strong>Coverage</strong>: Every active validator attests exactly once per epoch</li>
+                <li><strong>Security</strong>: Each committee has enough validators that controlling it is infeasible</li>
+                <li><strong>Efficiency</strong>: Committee sizes are bounded so aggregation is practical</li>
+                <li><strong>Unpredictability</strong>: Assignments can't be known far in advance</li>
+            </ol>
+        </section>
+
+        <section class="content">
+            <h2>🔢 The Constants</h2>
+            <pre><code class="language-python">TARGET_COMMITTEE_SIZE    = 128    # Minimum safe committee size
+MAX_COMMITTEES_PER_SLOT  = 64     # Upper bound on parallelism
+SLOTS_PER_EPOCH          = 32     # Committees rotate each epoch</code></pre>
+            
+            <p>Why 128? From the spec:</p>
+            <blockquote>
+                For the safety of committees, TARGET_COMMITTEE_SIZE exceeds the recommended minimum committee size of 111
+            </blockquote>
+            
+            <p>The 111 comes from birthday-bound analysis—below this threshold, an attacker with &lt;1/3 stake has non-negligible probability of controlling a committee by chance.</p>
+        </section>
+
+        <section class="content">
+            <h2>📐 How Many Committees Per Slot?</h2>
+            <pre><code class="language-python">def get_committee_count_per_slot(state: BeaconState, epoch: Epoch) -> uint64:
+    return max(
+        uint64(1),
+        min(
+            MAX_COMMITTEES_PER_SLOT,  # 64
+            uint64(len(get_active_validator_indices(state, epoch)))
+            // SLOTS_PER_EPOCH        # 32
+            // TARGET_COMMITTEE_SIZE, # 128
+        ),
+    )</code></pre>
+            
+            <h3>The Math</h3>
+            <p>The formula is: <code>active_validators / 32 / 128 = active_validators / 4096</code></p>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>Active Validators</th>
+                        <th>Calculation</th>
+                        <th>Result</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>1,000,000</td>
+                        <td>1,000,000 / 4096 ≈ 244</td>
+                        <td><strong>64</strong> (capped)</td>
+                    </tr>
+                    <tr>
+                        <td>400,000</td>
+                        <td>400,000 / 4096 ≈ 97</td>
+                        <td><strong>64</strong> (capped)</td>
+                    </tr>
+                    <tr>
+                        <td>100,000</td>
+                        <td>100,000 / 4096 ≈ 24</td>
+                        <td><strong>24</strong></td>
+                    </tr>
+                    <tr>
+                        <td>4,000</td>
+                        <td>4,000 / 4096 < 1</td>
+                        <td><strong>1</strong> (minimum)</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <div class="insight">
+                <strong>Key Insight:</strong> The formula ensures committee sizes stay ≥128 whenever possible. More validators = more parallel committees, NOT larger committees.
+            </div>
+            
+            <p>Total committees per epoch: <code>committees_per_slot × 32</code></p>
+            <ul>
+                <li>At 64 committees/slot: 2048 committees/epoch</li>
+                <li>Each validator appears in exactly one committee per epoch</li>
+            </ul>
+        </section>
+
+        <section class="content">
+            <h2>🔧 Building the Committee</h2>
+            <pre><code class="language-python">def get_beacon_committee(
+    state: BeaconState, slot: Slot, index: CommitteeIndex
+) -> Sequence[ValidatorIndex]:
+    epoch = compute_epoch_at_slot(slot)
+    committees_per_slot = get_committee_count_per_slot(state, epoch)
+    return compute_committee(
+        indices=get_active_validator_indices(state, epoch),
+        seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
+        index=(slot % SLOTS_PER_EPOCH) * committees_per_slot + index,
+        count=committees_per_slot * SLOTS_PER_EPOCH,
+    )</code></pre>
+            
+            <h3>The Index Calculation</h3>
+            <p>The <code>index</code> calculation is crucial:</p>
+            <ul>
+                <li><code>slot % SLOTS_PER_EPOCH</code> → which slot within the epoch (0-31)</li>
+                <li>Multiply by <code>committees_per_slot</code> → offset for this slot</li>
+                <li>Add <code>index</code> → which committee within this slot</li>
+            </ul>
+            
+            <p>Example with 64 committees/slot:</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Slot</th>
+                        <th>Committee</th>
+                        <th>Global Index</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>0</td><td>0</td><td>0</td></tr>
+                    <tr><td>0</td><td>63</td><td>63</td></tr>
+                    <tr><td>1</td><td>0</td><td>64</td></tr>
+                    <tr><td>31</td><td>63</td><td>2047</td></tr>
+                </tbody>
+            </table>
+            
+            <p>Total <code>count</code> = 64 × 32 = 2048 committees, and each validator lands in exactly one.</p>
+        </section>
+
+        <section class="content">
+            <h2>🎰 compute_committee: Where Shuffling Meets Slicing</h2>
+            <pre><code class="language-python">def compute_committee(
+    indices: Sequence[ValidatorIndex],
+    seed: Bytes32,
+    index: uint64,
+    count: uint64,
+) -> Sequence[ValidatorIndex]:
+    start = (len(indices) * index) // count
+    end = (len(indices) * (index + 1)) // count
+    return [
+        indices[compute_shuffled_index(uint64(i), uint64(len(indices)), seed)]
+        for i in range(start, end)
+    ]</code></pre>
+            
+            <h3>The Algorithm</h3>
+            <ol>
+                <li>Divide the validator set into <code>count</code> equal-ish slices</li>
+                <li>For committee <code>index</code>, take validators from position <code>start</code> to <code>end</code></li>
+                <li>But don't take validators at those positions—take the <strong>shuffled</strong> positions</li>
+            </ol>
+            
+            <div class="insight">
+                <strong>Why not shuffle first, then slice?</strong>
+                <p>That would require shuffling the entire validator set (expensive). Instead: compute the shuffled index only for positions we need.</p>
+                <p>With 1M validators and 2048 committees: each committee ~488 validators. We only call <code>compute_shuffled_index</code> ~488 times, not 1M times.</p>
+            </div>
+            
+            <h3>The Seed</h3>
+            <p><code>get_seed(state, epoch, DOMAIN_BEACON_ATTESTER)</code></p>
+            <ul>
+                <li>Derived from RANDAO + epoch + domain</li>
+                <li>Same seed = same shuffle for entire epoch</li>
+                <li>Domain separation ensures attester shuffle ≠ proposer shuffle</li>
+            </ul>
+        </section>
+
+        <section class="content">
+            <h2>⚔️ Security Analysis</h2>
+            
+            <h3>Why TARGET_COMMITTEE_SIZE = 128?</h3>
+            <p>With random sampling, probability that attacker with <code>p</code> stake controls ≥2/3 of a committee of size <code>n</code>:</p>
+            <pre><code>P(attack) ≈ exp(-n × D(2/3 || p))</code></pre>
+            <p>where D is KL divergence. For p=1/3 and n=128:</p>
+            <ul>
+                <li>P(attack) ≈ 2<sup>-40</sup> (one in a trillion)</li>
+            </ul>
+            <p>For n=64: P(attack) ≈ 2<sup>-20</sup> (plausible with many attempts)</p>
+            
+            <p><strong>The 111 threshold</strong> from Vitalik's analysis assumes slightly different parameters, but same principle: below ~100, random committee takeover becomes feasible.</p>
+            
+            <h3>What if not enough validators?</h3>
+            <p>At genesis with only 16,384 validators:</p>
+            <ul>
+                <li>committees_per_slot = 16384 / 4096 = 4</li>
+                <li>Committee size = 16384 / (4 × 32) = 128 ✓</li>
+            </ul>
+            <p>The formula automatically reduces parallelism to maintain minimum committee size.</p>
+            
+            <h3>At the minimum (1 committee/slot)</h3>
+            <ul>
+                <li>4096 validators or fewer</li>
+                <li>Each committee = all validators in that slot</li>
+                <li>Still rotates across the epoch</li>
+            </ul>
+        </section>
+
+        <section class="content">
+            <h2>🔗 Committees → Attestations</h2>
+            <p>When you attest, you include:</p>
+            <pre><code class="language-python">class AttestationData(Container):
+    slot: Slot              # When you're attesting
+    index: CommitteeIndex   # Which committee you're in
+    beacon_block_root: Root # Your head vote
+    source: Checkpoint      # FFG source
+    target: Checkpoint      # FFG target</code></pre>
+            
+            <p>The <code>index</code> field identifies your committee. Your validator client:</p>
+            <ol>
+                <li>Calls <code>get_beacon_committee(state, slot, index)</code> to get committee members</li>
+                <li>Finds your position in that list</li>
+                <li>Sets the corresponding bit in <code>aggregation_bits</code></li>
+            </ol>
+            
+            <p><strong>Attestation aggregation</strong> happens within committees:</p>
+            <ul>
+                <li>All committee members voting for the same head can be merged</li>
+                <li>One signature covers up to 2048 validators (MAX_VALIDATORS_PER_COMMITTEE)</li>
+            </ul>
+        </section>
+
+        <section class="gotchas">
+            <h2>⚠️ Gotchas</h2>
+            <ol>
+                <li><strong>Committees are epoch-stable</strong>: Same committee assignments for all 32 slots of an epoch (but each validator only attests once)</li>
+                <li><strong>Index bounds</strong>: <code>data.index < get_committee_count_per_slot(state, epoch)</code> is checked in attestation processing</li>
+                <li><strong>Empty slots</strong>: If a slot has no block, validators still attest. Committee assignments don't depend on block presence.</li>
+            </ol>
+        </section>
+
+        <section class="connections">
+            <h2>🔗 Connections</h2>
+            <ul>
+                <li><strong>Lesson 23</strong>: <code>compute_shuffled_index</code> provides the unpredictable permutation</li>
+                <li><strong>Lesson 25</strong>: Proposer selection uses different domain but similar mechanics</li>
+                <li><strong>Lesson 31</strong>: AttestationData uses committee index</li>
+                <li><strong>Lesson 28</strong>: EIP-7549 changes how attestations aggregate across committees</li>
+            </ul>
+        </section>
+
+        <footer class="lesson-footer">
+            <div class="next-lesson">
+                <strong>Tomorrow:</strong> Lesson 25 — Proposer Selection
+                <p>How does <code>compute_proposer_index</code> pick one validator per slot? It's weighted by effective balance, uses rejection sampling, and has subtle edge cases with slashed validators.</p>
+            </div>
+        </footer>
+    </article>
+</body>
+</html>
