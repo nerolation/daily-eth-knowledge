@@ -1,5 +1,11 @@
 [
   {
+    "file": "025-proposer-selection.html",
+    "title": "Proposer Selection",
+    "date": "2026-02-28",
+    "number": 25
+  },
+  {
     "file": "024-beacon-committees.html",
     "title": "Beacon Committees",
     "date": "2026-02-27",

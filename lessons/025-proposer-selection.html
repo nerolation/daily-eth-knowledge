@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 25: Proposer Selection | Ethereum Consensus Specs</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-size: 0.9rem;
+        }
+        code {
+            font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+        }
+        .spec-ref {
+            background: #1f2937;
+            border-left: 3px solid var(--accent);
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .gotcha {
+            background: #3b2e1a;
+            border-left: 3px solid #f59e0b;
+            padding: 0.5rem 1rem;
+            margin: 0.5rem 0;
+        }
+        .section { margin: 2rem 0; }
+        .nav { margin-top: 2rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+        .formula {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 4px;
+            text-align: center;
+            font-family: monospace;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>📚 Lesson 25: Proposer Selection</h1>
+        <p><em>How Ethereum picks who proposes each block</em></p>
+    </header>
+
+    <section class="section">
+        <h2>Overview</h2>
+        <p>Every slot needs exactly one block proposer. The selection must be:</p>
+        <ul>
+            <li><strong>Unpredictable</strong> — can't be gamed ahead of time</li>
+            <li><strong>Weighted by stake</strong> — more ETH = proportionally more proposals</li>
+            <li><strong>Deterministic</strong> — every node computes the same proposer</li>
+        </ul>
+        
+        <div class="spec-ref">
+            <strong>🔍 Spec Location:</strong> <code>phase0/beacon-chain.md</code> → 
+            <code>get_beacon_proposer_index</code>, <code>compute_proposer_index</code>
+        </div>
+    </section>
+
+    <section class="section">
+        <h2>💡 Core Concept</h2>
+        <p>Proposer selection is a <strong>weighted random sample</strong> from all active validators. The algorithm:</p>
+        <ol>
+            <li>Derive a slot-specific seed from RANDAO</li>
+            <li>Iterate through shuffled validator indices</li>
+            <li>Accept or reject each candidate based on effective balance</li>
+        </ol>
+        
+        <div class="formula">
+            P(accept) = effective_balance / MAX_EFFECTIVE_BALANCE
+        </div>
+        
+        <p>A 32 ETH validator has 100% accept chance when selected. A 16 ETH validator (if it existed pre-Electra) would have 50%.</p>
+    </section>
+
+    <section class="section">
+        <h2>🛠 The Code — get_beacon_proposer_index</h2>
+        <pre><code>def get_beacon_proposer_index(state: BeaconState) -> ValidatorIndex:
+    epoch = get_current_epoch(state)
+    # Mix slot into seed for per-slot uniqueness
+    seed = hash(get_seed(state, epoch, DOMAIN_BEACON_PROPOSER) 
+                + uint_to_bytes(state.slot))
+    indices = get_active_validator_indices(state, epoch)
+    return compute_proposer_index(state, indices, seed)</code></pre>
+        
+        <p><strong>Key insight:</strong> The seed combines:</p>
+        <ul>
+            <li><strong>RANDAO mix</strong> (from MIN_SEED_LOOKAHEAD epochs ago)</li>
+            <li><strong>DOMAIN_BEACON_PROPOSER</strong> (domain separation)</li>
+            <li><strong>Epoch</strong> (hashed into the seed)</li>
+            <li><strong>Slot</strong> (hashed on top)</li>
+        </ul>
+        <p>This ensures different proposers for different slots, even within the same epoch.</p>
+    </section>
+
+    <section class="section">
+        <h2>🛠 The Code — compute_proposer_index (Phase 0)</h2>
+        <pre><code>def compute_proposer_index(
+    state: BeaconState, 
+    indices: Sequence[ValidatorIndex], 
+    seed: Bytes32
+) -> ValidatorIndex:
+    assert len(indices) > 0
+    MAX_RANDOM_BYTE = 2**8 - 1  # 255
+    i = uint64(0)
+    total = uint64(len(indices))
+    
+    while True:
+        # Pick a shuffled candidate
+        candidate_index = indices[
+            compute_shuffled_index(i % total, total, seed)
+        ]
+        # Get randomness for this iteration
+        random_byte = hash(
+            seed + uint_to_bytes(uint64(i // 32))
+        )[i % 32]
+        
+        effective_balance = state.validators[
+            candidate_index
+        ].effective_balance
+        
+        # Accept/reject based on stake weight
+        if (effective_balance * MAX_RANDOM_BYTE >= 
+            MAX_EFFECTIVE_BALANCE * random_byte):
+            return candidate_index
+        i += 1</code></pre>
+    </section>
+
+    <section class="section">
+        <h2>🔬 Dissecting the Inner Loop</h2>
+        
+        <h3>Step 1 — Candidate Selection</h3>
+        <p><code>compute_shuffled_index(i % total, ...)</code> wraps around the validator list. First iteration tries index 0's shuffled position, then 1, etc.</p>
+        
+        <h3>Step 2 — Fresh Randomness</h3>
+        <p>Each batch of 32 iterations shares a hash (amortized cost). Within the batch, each iteration uses a different byte.</p>
+        
+        <h3>Step 3 — Weighted Acceptance</h3>
+        <pre><code>effective_balance * 255 >= MAX_EFFECTIVE_BALANCE * random_byte</code></pre>
+        
+        <p><strong>For 32 ETH validator (max effective):</strong></p>
+        <ul>
+            <li><code>32e9 * 255 >= 32e9 * random_byte</code></li>
+            <li>Simplifies to: <code>255 >= random_byte</code></li>
+            <li><strong>Always true</strong> — 100% acceptance</li>
+        </ul>
+        
+        <p><strong>For hypothetical 16 ETH:</strong></p>
+        <ul>
+            <li><code>16e9 * 255 >= 32e9 * random_byte</code></li>
+            <li>Simplifies to: <code>127.5 >= random_byte</code></li>
+            <li>~50% acceptance (random_byte ∈ [0, 255])</li>
+        </ul>
+    </section>
+
+    <section class="section">
+        <h2>⚡ Electra Modification (EIP-7251 MaxEB)</h2>
+        <p>With variable effective balance up to 2048 ETH, the algorithm needed more precision:</p>
+        
+        <pre><code>def compute_proposer_index(...) -> ValidatorIndex:
+    assert len(indices) > 0
+    MAX_RANDOM_VALUE = 2**16 - 1  # 65535 (was 255)
+    i = uint64(0)
+    total = uint64(len(indices))
+    
+    while True:
+        candidate_index = indices[
+            compute_shuffled_index(i % total, total, seed)
+        ]
+        # [Modified] 2 bytes instead of 1
+        random_bytes = hash(seed + uint_to_bytes(i // 16))
+        offset = i % 16 * 2
+        random_value = bytes_to_uint64(
+            random_bytes[offset : offset + 2]
+        )
+        effective_balance = state.validators[
+            candidate_index
+        ].effective_balance
+        
+        # [Modified] Compare against 2048 ETH max
+        if (effective_balance * MAX_RANDOM_VALUE >= 
+            MAX_EFFECTIVE_BALANCE_ELECTRA * random_value):
+            return candidate_index
+        i += 1</code></pre>
+        
+        <h3>Why the change?</h3>
+        <ul>
+            <li>8-bit random gives 256 "buckets" — too coarse for 2048 ETH range</li>
+            <li>16-bit random gives 65536 buckets — smooth distribution</li>
+            <li>A 2048 ETH validator now has 64× the proposal chance of 32 ETH</li>
+        </ul>
+    </section>
+
+    <section class="section">
+        <h2>❓ Why This Design</h2>
+        
+        <p><strong>Q: Why not just pick proportionally by stake directly?</strong><br>
+        A: Would require computing cumulative stake sums, binary search. The loop is simpler and terminates quickly in practice.</p>
+        
+        <p><strong>Q: How many iterations on average?</strong><br>
+        A: With all validators at MAX_EFFECTIVE_BALANCE, exactly 1 iteration (100% acceptance). With mixed balances, still typically 1-2.</p>
+        
+        <p><strong>Q: What if infinite loop?</strong><br>
+        A: Impossible — at least one validator has positive effective balance, and the acceptance condition eventually triggers.</p>
+    </section>
+
+    <section class="section">
+        <h2>🔗 Connections</h2>
+        <ul>
+            <li><strong>Lesson 10 (RANDAO)</strong> — The randomness source for proposer seeds</li>
+            <li><strong>Lesson 23 (Shuffling)</strong> — <code>compute_shuffled_index</code> used here iterates validators in shuffled order</li>
+            <li><strong>Lesson 11 (Effective Balance)</strong> — Stake weighting depends on this, not actual balance</li>
+            <li><strong>Lesson 30 (Lookahead)</strong> — MIN_SEED_LOOKAHEAD determines when you learn your proposal slot</li>
+        </ul>
+    </section>
+
+    <section class="section">
+        <h2>⚠️ Gotchas</h2>
+        
+        <div class="gotcha">
+            <strong>1. Proposer is slot-dependent, not block-dependent</strong><br>
+            Same slot → same proposer, regardless of which parent block you're building on.
+        </div>
+        
+        <div class="gotcha">
+            <strong>2. RANDAO manipulation limited</strong><br>
+            An adversary controlling the last proposer before seed finalization can bias by 1 bit — but seed is locked MIN_SEED_LOOKAHEAD (1 epoch) before use.
+        </div>
+        
+        <div class="gotcha">
+            <strong>3. The loop looks unbounded but isn't</strong><br>
+            Maximum iterations proportional to MAX_EFFECTIVE_BALANCE / min(effective_balance). With realistic balances, terminates fast.
+        </div>
+        
+        <div class="gotcha">
+            <strong>4. Slashed validators can still be proposers</strong><br>
+            <code>get_active_validator_indices</code> includes slashed validators until exit_epoch. They're active, just penalized.
+        </div>
+    </section>
+
+    <section class="section">
+        <h2>📖 Further Reading</h2>
+        <ul>
+            <li>Original Casper FFG paper: proposer selection rationale</li>
+            <li>EIP-7251: MaxEB and the 16-bit upgrade rationale</li>
+            <li>Fork choice spec: how proposer boost interacts with selection</li>
+        </ul>
+    </section>
+
+    <footer class="nav">
+        <p><strong>Previous:</strong> Lesson 24 — Beacon Committees</p>
+        <p><strong>Next:</strong> Lesson 26 — Sync Committees (Altair)</p>
+    </footer>
+</body>
+</html>
