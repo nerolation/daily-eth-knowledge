@@ -1,5 +1,11 @@
 [
   {
+    "file": "026-sync-committees.html",
+    "title": "Sync Committees (Altair)",
+    "date": "2026-03-01",
+    "number": 26
+  },
+  {
     "file": "025-proposer-selection.html",
     "title": "Proposer Selection",
     "date": "2026-02-28",

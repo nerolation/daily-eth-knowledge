@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 26: Sync Committees (Altair) | Ethereum Consensus Specs</title>
+    <meta name="description" content="Deep dive into Altair sync committees - the 512-validator committees that enable light clients to verify Ethereum blocks with minimal data.">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code { padding: 0; }
+        .meta {
+            color: #8b949e;
+            font-size: 0.9em;
+            margin-bottom: 2rem;
+        }
+        .highlight { color: #f0883e; }
+        .section { margin: 2rem 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .warning {
+            background: #2d1b00;
+            border-left: 4px solid #f0883e;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        a { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <article>
+        <h1>Lesson 26: Sync Committees (Altair)</h1>
+        <div class="meta">
+            <strong>Module:</strong> Committees and Shuffling (3/8) |
+            <strong>Date:</strong> March 1, 2026 |
+            <strong>Spec:</strong> altair/beacon-chain.md
+        </div>
+
+        <section class="section">
+            <h2>📚 Topic</h2>
+            <p>The 512-validator committees that sign every block, enabling light clients to track the chain with minimal data.</p>
+        </section>
+
+        <section class="section">
+            <h2>🔍 Spec Location</h2>
+            <p><code>altair/beacon-chain.md</code> → SyncCommittee, get_next_sync_committee_indices, process_sync_aggregate</p>
+        </section>
+
+        <section class="section">
+            <h2>💡 Core Concept</h2>
+            <p>Sync committees solve a fundamental problem: <strong>how can a resource-constrained device verify Ethereum's head without processing the full validator set?</strong></p>
+
+            <p>Before Altair, you'd need ~500k validators' attestations to verify the head. That's impractical for phones, IoT devices, or cross-chain bridges running in blockchain VMs.</p>
+
+            <p>The insight: instead of having <em>everyone</em> attest, have a <strong>small rotating committee</strong> sign the block root each slot. Light clients only need to track this committee (512 validators) to verify blocks.</p>
+
+            <h3>Key Parameters</h3>
+            <table>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td><code>SYNC_COMMITTEE_SIZE</code></td>
+                    <td>512</td>
+                    <td>Validators per committee</td>
+                </tr>
+                <tr>
+                    <td><code>EPOCHS_PER_SYNC_COMMITTEE_PERIOD</code></td>
+                    <td>256</td>
+                    <td>Epochs per rotation (~27.3 hours)</td>
+                </tr>
+            </table>
+
+            <p>256 epochs × 32 slots × 12 seconds = <strong>~27.3 hours</strong> per committee period.</p>
+        </section>
+
+        <section class="section">
+            <h2>🛠 Data Structures</h2>
+
+            <h3>SyncCommittee</h3>
+            <p>The committee itself:</p>
+<pre><code>class SyncCommittee(Container):
+    pubkeys: Vector[BLSPubkey, SYNC_COMMITTEE_SIZE]  # 512 pubkeys
+    aggregate_pubkey: BLSPubkey  # Precomputed for efficiency</code></pre>
+
+            <p>The <code>aggregate_pubkey</code> is a BLS aggregation of all 512 pubkeys. When all members participate, verification uses this single key instead of aggregating 512 keys on the fly.</p>
+
+            <h3>SyncAggregate</h3>
+            <p>What goes in each block:</p>
+<pre><code>class SyncAggregate(Container):
+    sync_committee_bits: Bitvector[SYNC_COMMITTEE_SIZE]  # Who participated
+    sync_committee_signature: BLSSignature  # Aggregated sig</code></pre>
+
+            <p>The committee signs the <strong>previous slot's block root</strong>. This 1-slot delay gives time for block propagation before sync committee members need to sign.</p>
+        </section>
+
+        <section class="section">
+            <h2>🔧 Selection Algorithm</h2>
+            <p><code>get_next_sync_committee_indices</code> selects committee members using a similar pattern to proposer selection:</p>
+
+<pre><code>def get_next_sync_committee_indices(state: BeaconState) -> Sequence[ValidatorIndex]:
+    epoch = Epoch(get_current_epoch(state) + 1)
+    MAX_RANDOM_BYTE = 2**8 - 1
+    active_validator_indices = get_active_validator_indices(state, epoch)
+    active_validator_count = uint64(len(active_validator_indices))
+    seed = get_seed(state, epoch, DOMAIN_SYNC_COMMITTEE)
+    i = 0
+    sync_committee_indices: List[ValidatorIndex] = []
+    
+    while len(sync_committee_indices) < SYNC_COMMITTEE_SIZE:
+        shuffled_index = compute_shuffled_index(
+            uint64(i % active_validator_count), active_validator_count, seed
+        )
+        candidate_index = active_validator_indices[shuffled_index]
+        random_byte = hash(seed + uint_to_bytes(uint64(i // 32)))[i % 32]
+        effective_balance = state.validators[candidate_index].effective_balance
+        
+        # Proportional selection: higher stake = more likely
+        if effective_balance * MAX_RANDOM_BYTE >= MAX_EFFECTIVE_BALANCE * random_byte:
+            sync_committee_indices.append(candidate_index)
+        i += 1
+    
+    return sync_committee_indices</code></pre>
+
+            <div class="warning">
+                <strong>Critical detail:</strong> Unlike beacon committees, sync committee members <strong>can appear multiple times</strong>. With 500k validators competing for 512 spots over 27 hours, duplicates are rare but allowed. A validator appearing twice signs twice and gets double rewards.
+            </div>
+
+            <p><strong>Why balance weighting?</strong> Same rationale as proposer selection—stake-weighted selection maintains economic alignment. A 64 ETH validator should have twice the sync committee presence of a 32 ETH validator.</p>
+        </section>
+
+        <section class="section">
+            <h2>⚙️ Processing: process_sync_aggregate</h2>
+            <p>The signature verification has a clever optimization:</p>
+
+<pre><code>if sum(committee_bits) == SYNC_COMMITTEE_SIZE:
+    # All 512 participated: use precomputed aggregate key
+    participant_pubkeys = [state.current_sync_committee.aggregate_pubkey]
+    
+elif sum(committee_bits) > SYNC_COMMITTEE_SIZE // 2:
+    # >50% participated: subtract non-participants
+    non_participant_aggregate = eth_aggregate_pubkeys(non_participant_pubkeys)
+    participant_pubkey = bls.add(
+        bls.bytes48_to_G1(aggregate_pubkey),
+        bls.neg(bls.bytes48_to_G1(non_participant_aggregate))
+    )
+    participant_pubkeys = [BLSPubkey(bls.G1_to_bytes48(participant_pubkey))]
+    
+else:
+    # <50%: aggregate participant keys directly
+    participant_pubkeys = [pubkey for pubkey, bit in zip(...) if bit]</code></pre>
+
+            <p>When >50% participate, it's cheaper to subtract non-participants from the precomputed aggregate than to aggregate participants from scratch. This is BLS math: <code>agg(P1...Pn) - agg(Pm...Pk) = agg(remaining)</code>.</p>
+        </section>
+
+        <section class="section">
+            <h2>💰 Rewards & Penalties</h2>
+            <p>Sync committee rewards use a dedicated weight:</p>
+<pre><code>SYNC_REWARD_WEIGHT = 2  (out of WEIGHT_DENOMINATOR = 64)</code></pre>
+
+            <p>That's 2/64 = <strong>3.125%</strong> of total validator rewards allocated to sync committee duties.</p>
+
+<pre><code>max_participant_rewards = Gwei(
+    total_base_rewards * SYNC_REWARD_WEIGHT // WEIGHT_DENOMINATOR // SLOTS_PER_EPOCH
+)
+participant_reward = Gwei(max_participant_rewards // SYNC_COMMITTEE_SIZE)</code></pre>
+
+            <p>The reward is divided by SLOTS_PER_EPOCH because sync committee members sign <strong>every slot</strong> for 256 epochs. Over the full period, this adds up.</p>
+
+            <h3>Proposer Bonus</h3>
+<pre><code>proposer_reward = Gwei(
+    participant_reward * PROPOSER_WEIGHT // (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT)
+)</code></pre>
+
+            <h3>Penalties</h3>
+            <p>Missing sync committee duties costs you the same as the reward. If you don't sign, you're penalized <code>participant_reward</code> per slot. Unlike attestation penalties, this is <strong>symmetric</strong>—miss a slot, lose exactly what you'd have earned.</p>
+        </section>
+
+        <section class="section">
+            <h2>🔄 Period Transitions</h2>
+            <p>Committees rotate at epoch boundaries where <code>epoch % 256 == 0</code>:</p>
+
+<pre><code>def process_sync_committee_updates(state: BeaconState) -> None:
+    next_epoch = get_current_epoch(state) + Epoch(1)
+    if next_epoch % EPOCHS_PER_SYNC_COMMITTEE_PERIOD == 0:
+        state.current_sync_committee = state.next_sync_committee
+        state.next_sync_committee = get_next_sync_committee(state)</code></pre>
+
+            <h3>Two Committees in State</h3>
+            <ul>
+                <li><code>current_sync_committee</code>: Active for this period</li>
+                <li><code>next_sync_committee</code>: Precomputed for next period</li>
+            </ul>
+
+            <p><strong>Why precompute?</strong> Light clients need the next committee before the transition. Without lookahead, there'd be a gap where light clients can't verify blocks at period boundaries.</p>
+
+            <p>The next committee is computed ~27 hours in advance—enough time for light clients to learn it via sync protocol updates.</p>
+        </section>
+
+        <section class="section">
+            <h2>❓ Design Rationale</h2>
+
+            <h3>Why 512 validators?</h3>
+            <p>Security vs efficiency tradeoff. 512 provides:</p>
+            <ul>
+                <li>~341 honest validators needed for 2/3 supermajority</li>
+                <li>Low probability of adversary controlling majority with <1/3 total stake</li>
+                <li>Small enough for light clients to track (512 × 48 bytes = 24 KB per committee)</li>
+            </ul>
+
+            <h3>Why 256 epochs (~27 hours)?</h3>
+            <ul>
+                <li>Long enough that validators can prepare (sync to correct head)</li>
+                <li>Short enough for stake fluidity (exited validators don't stay forever)</li>
+                <li>Light clients update ~once per day</li>
+            </ul>
+
+            <h3>Why separate from attesters?</h3>
+            <p>Attesters rotate every epoch and focus on fork choice. Sync committees:</p>
+            <ul>
+                <li>Have a dedicated purpose: enabling light clients</li>
+                <li>Can optimize for this single task</li>
+                <li>Don't add load to attestation subnets</li>
+            </ul>
+        </section>
+
+        <section class="section">
+            <h2>🔗 Connections</h2>
+            <ul>
+                <li><strong>Light Client Sync Protocol</strong> (<code>altair/light-client/sync-protocol.md</code>): The consumer of sync committees. Uses <code>LightClientUpdate</code> containing <code>SyncAggregate</code> to prove finalized headers.</li>
+                <li><strong>Proposer Selection</strong>: Same balance-weighted random sampling pattern</li>
+                <li><strong>Committee Index Aggregation (EIP-7549)</strong>: Different problem—that's about attestation efficiency, not light clients</li>
+            </ul>
+        </section>
+
+        <section class="section">
+            <h2>⚠️ Gotchas</h2>
+            <ol>
+                <li><strong>Duplicate membership</strong>: The same validator can appear multiple times in a sync committee. Check for this when analyzing participation rates.</li>
+                <li><strong>Signs previous slot</strong>: <code>sync_aggregate</code> in block N contains signatures over block N-1's root. This 1-slot delay is intentional.</li>
+                <li><strong>Symmetric penalties</strong>: Unlike attestation penalties (which only apply to source/target misses, not head), sync committee penalties are symmetric—miss = lose what you'd earn.</li>
+                <li><strong>Period boundary stakes</strong>: Light clients need <code>next_sync_committee</code> BEFORE the transition. The proof comes from the <code>attested_header.state_root</code> in <code>LightClientUpdate</code>.</li>
+            </ol>
+        </section>
+
+        <section class="section">
+            <h2>📖 Next Lesson</h2>
+            <p><strong>Lesson 27:</strong> Sync Committee Rewards — deeper dive into SYNC_REWARD_WEIGHT math and proposer incentives</p>
+        </section>
+    </article>
+</body>
+</html>
