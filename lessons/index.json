@@ -1,5 +1,11 @@
 [
   {
+    "file": "028-committee-index-aggregation.html",
+    "title": "Committee Index Aggregation (EIP-7549)",
+    "date": "2026-03-03",
+    "number": 28
+  },
+  {
     "file": "027-sync-committee-rewards.html",
     "title": "Sync Committee Rewards",
     "date": "2026-03-02",

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 28: Committee Index Aggregation (EIP-7549)</title>
+    <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+    <article class="lesson">
+        <header>
+            <span class="lesson-number">Lesson 28</span>
+            <h1>Committee Index Aggregation (EIP-7549)</h1>
+            <time datetime="2026-03-03">March 3, 2026</time>
+        </header>
+
+        <section class="spec-location">
+            <h2>📍 Spec Location</h2>
+            <ul>
+                <li><code>electra/beacon-chain.md</code> → Modified <code>Attestation</code>, <code>IndexedAttestation</code>, <code>get_attesting_indices</code></li>
+                <li>EIP-7549: "Move committee index outside Attestation"</li>
+            </ul>
+        </section>
+
+        <section class="core-concept">
+            <h2>💡 Core Concept</h2>
+            <p>EIP-7549 fundamentally changes how attestations aggregate. The key insight: <em>every slot, all committees vote on the same thing</em> — same LMD GHOST vote (block root, slot) and same FFG vote (source, target). The only difference? Committee index.</p>
+
+            <h3>The Problem (Pre-Electra)</h3>
+            <pre><code class="language-python"># Phase 0 AttestationData - committee index INSIDE the signed data
+class AttestationData(Container):
+    slot: Slot
+    index: CommitteeIndex      # ← This is signed!
+    beacon_block_root: Root
+    source: Checkpoint
+    target: Checkpoint</code></pre>
+            
+            <p>Because <code>index</code> is part of the signed <code>AttestationData</code>, attestations from different committees produce <strong>different signing roots</strong> — even when they're voting for identical (slot, block, source, target).</p>
+            
+            <p>Result: You can only aggregate attestations from the <em>same committee</em>. With 64 committees per slot, you need to verify ~1,366 attestations minimum to reach 2/3 threshold.</p>
+        </section>
+
+        <section class="implementation">
+            <h2>🛠 The Electra Solution</h2>
+            <p>Move <code>index</code> outside the signed message. Now attestations with the same vote can aggregate across ALL committees:</p>
+
+            <pre><code class="language-python"># Electra Attestation - committee info OUTSIDE signed data
+class Attestation(Container):
+    # Spans ALL committees now
+    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
+    data: AttestationData    # index field ignored (set to 0)
+    signature: BLSSignature
+    # NEW: Which committees are included
+    committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]</code></pre>
+
+            <p>The <code>committee_bits</code> field is a 64-bit bitvector indicating which committees' validators are represented in this attestation. The <code>aggregation_bits</code> now spans across all included committees sequentially.</p>
+
+            <h3>Helper to decode which committees</h3>
+            <pre><code class="language-python">def get_committee_indices(committee_bits: Bitvector) -> Sequence[CommitteeIndex]:
+    return [CommitteeIndex(index) for index, bit in enumerate(committee_bits) if bit]</code></pre>
+
+            <h3>Modified get_attesting_indices</h3>
+            <pre><code class="language-python">def get_attesting_indices(state: BeaconState, attestation: Attestation) -> Set[ValidatorIndex]:
+    output: Set[ValidatorIndex] = set()
+    committee_indices = get_committee_indices(attestation.committee_bits)
+    committee_offset = 0
+    for committee_index in committee_indices:
+        committee = get_beacon_committee(state, attestation.data.slot, committee_index)
+        committee_attesters = set(
+            attester_index
+            for i, attester_index in enumerate(committee)
+            if attestation.aggregation_bits[committee_offset + i]
+        )
+        output = output.union(committee_attesters)
+        committee_offset += len(committee)
+    return output</code></pre>
+        </section>
+
+        <section class="rationale">
+            <h2>❓ Why This Way</h2>
+            <ol>
+                <li><strong>Verification efficiency</strong>: With cross-committee aggregation, minimum attestations to verify 2/3 drops from ~1,366 to ~22 (factor of 62!)</li>
+                <li><strong>ZK circuit optimization</strong>: Casper FFG proofs now need far fewer pairing operations</li>
+                <li><strong>Block space efficiency</strong>: Changed limits reflect new reality:
+                    <ul>
+                        <li><code>MAX_ATTESTATIONS_ELECTRA = 8</code> (down from 128)</li>
+                        <li><code>MAX_ATTESTER_SLASHINGS_ELECTRA = 1</code> (down from 2)</li>
+                        <li>But each attestation can carry ~64x more votes!</li>
+                    </ul>
+                </li>
+                <li><strong>Network resilience</strong>: Chain with only 1/8 online proposers can still include all votes. Pre-Electra: needed 1/2 online proposers.</li>
+            </ol>
+
+            <h3>Size Analysis</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Pre-Electra</th>
+                        <th>Electra</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Attestations per block</td>
+                        <td>Up to 128</td>
+                        <td>Up to 8</td>
+                    </tr>
+                    <tr>
+                        <td>Votes per attestation</td>
+                        <td>~2,048 max</td>
+                        <td>~131,072 max</td>
+                    </tr>
+                    <tr>
+                        <td>Slots of votes per block</td>
+                        <td>~2</td>
+                        <td>~8</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="connections">
+            <h2>🔗 Connections</h2>
+            <ul>
+                <li><code>SingleAttestation</code>: New container for individual validator attestations over gossip</li>
+                <li><code>IndexedAttestation</code>: Now supports <code>MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT</code> indices</li>
+                <li>Slashing detection: <code>AttesterSlashing</code> still works, just with bigger potential index lists</li>
+            </ul>
+        </section>
+
+        <section class="gotchas">
+            <h2>⚠️ Gotchas</h2>
+            <ol>
+                <li><strong>Fork transition gap</strong>: First Electra block can't include pre-fork attestations (container mismatch). One slot of FFG votes lost — acceptable tradeoff vs. dual-format complexity.</li>
+                <li><strong>Gossip mutation risk</strong>: Since <code>committee_bits</code> isn't signed, attackers could mutate it on p2p. Mitigated by: <em>"attestation.attester_index must be in get_beacon_committee(state, slot, index)"</em> — mutation fails this check.</li>
+                <li><strong>Bitvector vs Bitlist</strong>: <code>committee_bits</code> uses fixed-size <code>Bitvector[64]</code> — half the size of equivalent <code>Bitlist</code>. State transition validates that set bits match actual committee count.</li>
+                <li><strong>The index field lives on</strong>: <code>AttestationData.index</code> isn't removed — it's set to zero. Cleaner than Optional types from EIP-7495, and <code>AttesterSlashing</code> logic stays simpler.</li>
+            </ol>
+        </section>
+
+        <section class="takeaway">
+            <h2>🎯 Key Takeaway</h2>
+            <p>EIP-7549 is architectural cleanup with massive efficiency gains. Same votes, same security, but aggregate them together instead of keeping them artificially separated by committee assignment.</p>
+            <p>The invariant: <em>If validators vote for the same thing, their signatures should combine.</em> Pre-Electra violated this by signing over committee index. Now it doesn't.</p>
+        </section>
+
+        <footer>
+            <p class="nav">
+                <a href="027-sync-committee-rewards.html">← Previous: Sync Committee Rewards</a> |
+                <a href="029-target-committee-size.html">Next: Target Committee Size and Security →</a>
+            </p>
+        </footer>
+    </article>
+</body>
+</html>
