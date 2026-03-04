@@ -1,5 +1,11 @@
 [
   {
+    "file": "029-target-committee-size-security.html",
+    "title": "Target Committee Size and Security",
+    "date": "2026-03-04",
+    "number": 29
+  },
+  {
     "file": "028-committee-index-aggregation.html",
     "title": "Committee Index Aggregation (EIP-7549)",
     "date": "2026-03-03",

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 29: Target Committee Size and Security</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'Fira Code', Consolas, monospace;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code {
+            padding: 0;
+            background: none;
+        }
+        .spec-ref {
+            background: #1f2937;
+            border-left: 3px solid var(--accent);
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+            font-style: italic;
+        }
+        .warning {
+            background: #3d2a1e;
+            border-left: 3px solid #f0883e;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .math {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Fira Code', Consolas, monospace;
+            margin: 1rem 0;
+        }
+        .key-value {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 0.5rem 1rem;
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        .key { color: var(--accent); }
+        a { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 29: Target Committee Size and Security</h1>
+    
+    <div class="spec-ref">
+        <strong>Spec:</strong> phase0/beacon-chain.md → Preset → Misc
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    
+    <p>Why is <code>TARGET_COMMITTEE_SIZE = 128</code>? This isn't arbitrary—it's derived from probability theory to ensure committee-based consensus remains secure even with an adversary controlling up to 1/3 of stake.</p>
+
+    <p><strong>The threat model:</strong> if an adversary controls 1/3 of all validators globally, what's the probability they control >1/2 of a <em>random committee</em>? If committees are too small, random sampling variance can give the adversary majority by luck.</p>
+
+    <p>The spec note states:</p>
+    <blockquote>
+        For the safety of committees, <code>TARGET_COMMITTEE_SIZE</code> exceeds the recommended minimum committee size of 111
+    </blockquote>
+
+    <p>That 111 comes from Vitalik's 2018 sharding analysis using the <strong>birthday bound</strong>—a probabilistic guarantee that failure probability stays below 2<sup>-40</sup> (roughly one-in-a-trillion).</p>
+
+    <h2>🧮 The Math: Birthday Bound Analysis</h2>
+
+    <p>Let's derive why ~111+ validators provides 2<sup>-40</sup> failure probability.</p>
+
+    <h3>Setup:</h3>
+    <div class="key-value">
+        <span class="key">Total validators (N):</span><span>Large (e.g., 500k+)</span>
+        <span class="key">Adversary fraction (f):</span><span>1/3</span>
+        <span class="key">Committee size (n):</span><span>Variable</span>
+        <span class="key">"Failure":</span><span>Adversary gets >n/2 seats</span>
+    </div>
+
+    <p>This is a hypergeometric distribution, but for large N, approximates binomial:</p>
+    <div class="math">
+        P(adversary ≥ n/2 in committee) ≈ P(Binomial(n, 1/3) ≥ n/2)
+    </div>
+
+    <p>Using Chernoff bound for deviation from mean (n/3):</p>
+    <div class="math">
+        P(X ≥ n/2) = P(X ≥ (1+δ)μ) where μ = n/3, δ = 0.5<br>
+        ≤ exp(-μδ²/3) = exp(-n/36)
+    </div>
+
+    <p>For 2<sup>-40</sup> ≈ 10<sup>-12</sup> failure probability, the tighter Chernoff bound gives n ≈ 111. The spec rounds up to <strong>128</strong> (a nice power of 2) for extra margin.</p>
+
+    <h2>🛠 How the Spec Enforces This</h2>
+
+    <pre><code class="language-python"># Preset constants
+TARGET_COMMITTEE_SIZE = uint64(2**7)  # = 128
+MAX_COMMITTEES_PER_SLOT = uint64(2**6)  # = 64
+SLOTS_PER_EPOCH = uint64(2**5)  # = 32</code></pre>
+
+    <p>The <code>get_committee_count_per_slot</code> function dynamically adjusts:</p>
+
+    <pre><code class="language-python">def get_committee_count_per_slot(state, epoch):
+    return max(
+        uint64(1),
+        min(
+            MAX_COMMITTEES_PER_SLOT,
+            len(active_validators) // SLOTS_PER_EPOCH 
+                                   // TARGET_COMMITTEE_SIZE,
+        ),
+    )</code></pre>
+
+    <h3>Key Logic:</h3>
+    <ol>
+        <li>Divide active validators across 32 slots</li>
+        <li>Divide again by 128 to get committee count</li>
+        <li>Cap at 64 committees max, floor at 1 committee min</li>
+    </ol>
+
+    <h3>Example with 500k validators:</h3>
+    <div class="math">
+        committees_per_slot = min(64, 500000 / 32 / 128)<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = min(64, 122)<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 64 committees per slot<br>
+        committee_size ≈ 500000 / (32 × 64) ≈ 244 validators
+    </div>
+
+    <p><strong>Result:</strong> committees are ~244 validators—well above the 128 target.</p>
+
+    <h2>❓ Why This Design?</h2>
+
+    <h3>Why not just use ALL validators per slot?</h3>
+    <ul>
+        <li>BLS aggregation scales O(n) for verification</li>
+        <li>500k validators × 32 slots = network can't handle it</li>
+        <li>Committees provide statistical security with bounded work</li>
+    </ul>
+
+    <h3>Why 2/3 honest majority matters for committees:</h3>
+    <ul>
+        <li>Attestations need to reach finality threshold</li>
+        <li>A corrupted committee can't finalize bad blocks alone</li>
+        <li>But it CAN delay or create fork choice confusion</li>
+    </ul>
+
+    <h3>The real security property:</h3>
+    <p>For any given slot, with 1/3 adversary stake, the probability that ANY committee is adversary-majority is:</p>
+    <div class="math">
+        P(any bad) ≤ 64 × 2<sup>-40</sup> ≈ 2<sup>-34</sup>
+    </div>
+
+    <p>Still astronomically unlikely, but not zero. This is why Ethereum uses <em>aggregated</em> attestations across many committees, not single-committee decisions.</p>
+
+    <h2>⚠️ Gotchas</h2>
+
+    <div class="warning">
+        <strong>1. Low validator counts:</strong> With &lt;4096 validators (128 × 32), some committees WILL be smaller than 128. The protocol still works but with degraded statistical guarantees.
+    </div>
+
+    <div class="warning">
+        <strong>2. Assumes uniform random selection:</strong> The shuffling algorithm (swap-or-not with 90 rounds) must be unbiasable. RANDAO's 1-bit bias is considered acceptable given the margin.
+    </div>
+
+    <div class="warning">
+        <strong>3. 128 is TARGET, not guarantee:</strong> The spec ensures committees are <em>at least</em> this size when there are enough validators. <code>MAX_VALIDATORS_PER_COMMITTEE = 2048</code> sets the upper bound.
+    </div>
+
+    <h2>🔗 Connections</h2>
+    <ul>
+        <li><strong>Lesson 23 (Shuffling):</strong> The swap-or-not algorithm that distributes validators</li>
+        <li><strong>Lesson 24 (Beacon Committees):</strong> How validators are assigned using these constants</li>
+        <li><strong>Lesson 10 (RANDAO):</strong> Source of randomness that could theoretically be biased</li>
+        <li><strong>Future: VDF:</strong> The spec notes a VDF could "improve committee robustness and lower the safe minimum committee size"</li>
+    </ul>
+
+    <h2>📖 Further Reading</h2>
+    <ul>
+        <li>Vitalik's 2018 sharding analysis: the source of the 111 minimum (archived at web.archive.org)</li>
+        <li>"Minimum Committee Size" in eth2book: practical implications</li>
+        <li>Chernoff bounds: the mathematical foundation</li>
+    </ul>
+
+    <h2>Key Takeaway</h2>
+    <p><code>TARGET_COMMITTEE_SIZE = 128</code> is a cryptoeconomic security parameter, not a performance tuning knob. It guarantees that even with 1/3 adversary stake, random sampling into committees almost never gives adversaries majority control. The 2<sup>-40</sup> failure probability means you'd need to run the chain for longer than the universe's age to expect one unlucky committee.</p>
+
+    <footer style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e;">
+        <p><em>Next: Lesson 30 — Lookahead and Proposer Knowledge</em></p>
+    </footer>
+</body>
+</html>
