@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 30: Lookahead and Proposer Knowledge</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'Fira Code', Consolas, monospace;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code {
+            padding: 0;
+            background: none;
+        }
+        .spec-ref {
+            background: #1f2937;
+            border-left: 3px solid var(--accent);
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+            font-style: italic;
+        }
+        .warning {
+            background: #3d2a1e;
+            border-left: 3px solid #f0883e;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+        .math {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Fira Code', Consolas, monospace;
+            margin: 1rem 0;
+        }
+        .key-value {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 0.5rem 1rem;
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        .key { color: var(--accent); }
+        a { color: var(--accent); }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem 1rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); color: var(--accent); }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 30: Lookahead and Proposer Knowledge</h1>
+    
+    <div class="spec-ref">
+        <strong>Spec:</strong> phase0/beacon-chain.md → <code>get_seed</code>, <code>compute_activation_exit_epoch</code><br>
+        <strong>Also:</strong> phase0/validator.md → Lookahead section
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    
+    <p>Every committee assignment and proposer selection depends on randomness—but that randomness must be <em>committed</em> before validators know their duties. Otherwise, an adversary who learns they're the proposer could manipulate the RANDAO reveal to influence future selections.</p>
+    
+    <p>The spec manages this tension through <strong>lookahead parameters</strong>:</p>
+    
+    <div class="key-value">
+        <span class="key">MIN_SEED_LOOKAHEAD</span><span>1 epoch</span>
+        <span class="key">MAX_SEED_LOOKAHEAD</span><span>4 epochs</span>
+        <span class="key">EPOCHS_PER_HISTORICAL_VECTOR</span><span>65,536 epochs</span>
+    </div>
+    
+    <p>These create a delicate balance: validators need <em>enough</em> advance notice to prepare, but <em>not so much</em> that they can game the randomness.</p>
+
+    <h2>🛠 The Core Mechanism: <code>get_seed</code></h2>
+    
+    <pre><code>def get_seed(state: BeaconState, epoch: Epoch, domain_type: DomainType) -> Bytes32:
+    """Return the seed at ``epoch``."""
+    mix = get_randao_mix(
+        state, 
+        Epoch(epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1)
+    )  # Avoid underflow
+    return hash(domain_type + uint_to_bytes(epoch) + mix)</code></pre>
+    
+    <p>This is the function that powers ALL committee and proposer selection.</p>
+
+    <h2>The Math Behind the Lookahead</h2>
+    
+    <p>The RANDAO mix index for epoch E is:</p>
+    
+    <div class="math">
+E + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1
+= E + 65536 - 1 - 1
+= E + 65534
+
+Modulo EPOCHS_PER_HISTORICAL_VECTOR (how it's stored):
+(E + 65534) % 65536 = E - 2 (for practical values)
+    </div>
+    
+    <p>So the seed for epoch E uses the RANDAO mix from <strong>epoch E - 2</strong>.</p>
+    
+    <h3>Why This Matters</h3>
+    
+    <p>At epoch N, the RANDAO mix is updated by block proposers' reveals throughout epoch N. But duties for epoch N+1 are already determined using the mix from epoch N-1 (frozen before epoch N started).</p>
+    
+    <p>By the time a proposer in epoch N reveals their RANDAO, they <em>cannot</em> influence their own duties in epoch N+1—those were locked in epochs ago.</p>
+
+    <h2>⚠️ The Asymmetry: Committees vs Proposers</h2>
+    
+    <p>From <code>validator.md</code>:</p>
+    
+    <blockquote>"The beacon-chain shufflings are designed to provide a minimum of 1 epoch lookahead on the validator's upcoming <em>committee assignments</em> for attesting. Note that this lookahead <strong>does not apply to proposing</strong>, which must be checked during the epoch in question."</blockquote>
+    
+    <table>
+        <tr>
+            <th>Duty</th>
+            <th>Lookahead</th>
+            <th>When You Know</th>
+        </tr>
+        <tr>
+            <td><strong>Committee</strong></td>
+            <td>1 epoch</td>
+            <td>Start of epoch N for epoch N+1</td>
+        </tr>
+        <tr>
+            <td><strong>Proposer</strong></td>
+            <td>~0</td>
+            <td>During epoch N for slots in N</td>
+        </tr>
+    </table>
+    
+    <p><strong>Why the difference?</strong> Proposer selection uses the slot number in addition to the seed:</p>
+    
+    <pre><code>def get_beacon_proposer_index(state: BeaconState) -> ValidatorIndex:
+    epoch = get_current_epoch(state)
+    seed = hash(get_seed(state, epoch, DOMAIN_BEACON_PROPOSER) + uint_to_bytes(state.slot))
+    indices = get_active_validator_indices(state, epoch)
+    return compute_proposer_index(state, indices, seed)</code></pre>
+    
+    <p>The proposer for slot S depends on <code>state.slot</code>—which means you can only compute it once you're <em>in</em> that epoch.</p>
+
+    <h2><code>MAX_SEED_LOOKAHEAD</code> and Validator Lifecycle</h2>
+    
+    <p>There's a second lookahead constant: <code>MAX_SEED_LOOKAHEAD = 4</code>.</p>
+    
+    <p>This appears in activation/exit timing:</p>
+    
+    <pre><code>def compute_activation_exit_epoch(epoch: Epoch) -> Epoch:
+    """Return the epoch during which validator activations 
+       and exits initiated in ``epoch`` take effect."""
+    return Epoch(epoch + 1 + MAX_SEED_LOOKAHEAD)  # = epoch + 5</code></pre>
+    
+    <h3>Why 4 epochs?</h3>
+    
+    <p>If a validator could exit <em>instantly</em>, they could:</p>
+    <ol>
+        <li>Learn they're the proposer for slot S in epoch E</li>
+        <li>Trigger an exit before their proposer slot</li>
+        <li>Avoid penalties for withholding blocks or performing reorg attacks</li>
+    </ol>
+    
+    <p>The 5-epoch delay (1 + MAX_SEED_LOOKAHEAD) ensures that by the time you learn your duties, you're committed to being a validator for all of them.</p>
+
+    <h2><code>EPOCHS_PER_HISTORICAL_VECTOR</code> = 65,536</h2>
+    
+    <p>This is how far back the chain stores RANDAO mixes:</p>
+    
+    <pre><code>randao_mixes: Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR]</code></pre>
+    
+    <p>At ~6.4 minutes per epoch, that's <strong>~290 days</strong> of history. Why so long?</p>
+    
+    <p>It enables historical proofs and light client verification back many months. But functionally for lookahead, only the last few epochs matter.</p>
+
+    <h2>🔗 Connections</h2>
+    
+    <ul>
+        <li><strong>Lesson 10 (RANDAO)</strong>: The randomness that lookahead protects</li>
+        <li><strong>Lesson 23 (Shuffling)</strong>: Uses <code>get_seed</code> for committee computation</li>
+        <li><strong>Lesson 25 (Proposer Selection)</strong>: The slot-dependent proposer index</li>
+        <li><strong>Lesson 14 (Activation Queue)</strong>: Uses <code>MAX_SEED_LOOKAHEAD</code> delay</li>
+    </ul>
+
+    <h2>⚠️ Gotchas</h2>
+    
+    <div class="warning">
+        <p><strong>1. "Proposer lookahead" is misleading:</strong> You <em>can</em> compute future proposers if you know the seed, but you don't know the seed until you're in the epoch. In practice, clients compute all 32 proposers at epoch start.</p>
+    </div>
+    
+    <div class="warning">
+        <p><strong>2. RANDAO manipulation window:</strong> The <em>last</em> proposer in an epoch has 1-bit influence over the next epoch's seed. With <code>MIN_SEED_LOOKAHEAD=1</code>, they can't influence their <em>next</em> epoch duties, but they can influence epoch+2. This is the "1-bit bias attack" from Lesson 10.</p>
+    </div>
+    
+    <div class="warning">
+        <p><strong>3. Light clients can't verify future committees:</strong> They need the RANDAO mix, which requires tracking all block headers (or trusting a sync committee proof).</p>
+    </div>
+
+    <h2>❓ Why This Way</h2>
+    
+    <p>The 1-epoch minimum lookahead was a tradeoff:</p>
+    <ul>
+        <li><strong>Too short:</strong> Validators can't prepare (peer discovery, subnet joining)</li>
+        <li><strong>Too long:</strong> RANDAO manipulation becomes more powerful</li>
+        <li><strong>1 epoch (~6.4 min):</strong> Enough time for p2p setup, short enough to limit manipulation</li>
+    </ul>
+
+    <h2>📖 Key Takeaway</h2>
+    
+    <p><strong>Lookahead is about commitment before knowledge.</strong> The RANDAO mix that determines your duties was finalized <em>before</em> you could influence it. Your activation/exit takes effect <em>after</em> all your assigned duties. The game theory only works if this timing is airtight.</p>
+
+    <hr>
+    <p><em>Next: Lesson 31 — AttestationData Anatomy</em></p>
+</body>
+</html>
