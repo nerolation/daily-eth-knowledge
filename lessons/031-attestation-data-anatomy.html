@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 31: AttestationData Anatomy</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5em; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+        }
+        pre {
+            background: var(--code-bg);
+            padding: 1em;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        pre code { padding: 0; background: none; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1em 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5em;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .spec-ref {
+            background: #1f2937;
+            border-left: 3px solid var(--accent);
+            padding: 0.5em 1em;
+            margin: 1em 0;
+        }
+        .gotcha {
+            background: #2d1f1f;
+            border-left: 3px solid #f85149;
+            padding: 0.5em 1em;
+            margin: 1em 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 31: AttestationData Anatomy</h1>
+    <p><em>Module 4: Attestations Deep Dive</em></p>
+
+    <div class="spec-ref">
+        <strong>🔍 Spec Location:</strong><br>
+        <code>phase0/beacon-chain.md</code> → AttestationData, process_attestation<br>
+        <code>phase0/fork-choice.md</code> → on_attestation, validate_on_attestation
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p><code>AttestationData</code> is the atomic unit of consensus participation. Every validator's duty is to produce this 5-field structure once per epoch. It encodes two distinct votes:</p>
+    <ol>
+        <li><strong>LMD-GHOST vote</strong> (head vote) → <code>beacon_block_root</code></li>
+        <li><strong>FFG vote</strong> (finality vote) → <code>source</code> + <code>target</code></li>
+    </ol>
+    <p>The brilliance: both votes share the same BLS signature, so you get fork choice AND finality participation in one 112-byte commitment.</p>
+
+    <pre><code class="language-python">class AttestationData(Container):
+    slot: Slot
+    index: CommitteeIndex
+    beacon_block_root: Root  # LMD-GHOST vote
+    source: Checkpoint       # FFG source
+    target: Checkpoint       # FFG target</code></pre>
+
+    <p>Each <code>Checkpoint</code> is just:</p>
+    <pre><code class="language-python">class Checkpoint(Container):
+    epoch: Epoch
+    root: Root</code></pre>
+
+    <h2>🛠 Field-by-Field Analysis</h2>
+
+    <h3>1. <code>slot: Slot</code></h3>
+    <p>When the attestation was created. NOT when it's included on-chain.</p>
+    <ul>
+        <li>Used for: committee assignment, inclusion delay calculation, timing validation</li>
+        <li>Constraint: <code>data.slot + 1 <= state.slot <= data.slot + 32</code></li>
+    </ul>
+
+    <h3>2. <code>index: CommitteeIndex</code></h3>
+    <p>Which of the slot's committees produced this attestation.</p>
+    <ul>
+        <li>Valid range: <code>0 <= index < get_committee_count_per_slot(state, epoch)</code></li>
+        <li>With ~1M validators: typically 64 committees per slot (MAX_COMMITTEES_PER_SLOT)</li>
+        <li>With fewer validators: scales down but each committee stays ≥128 (TARGET_COMMITTEE_SIZE)</li>
+    </ul>
+
+    <h3>3. <code>beacon_block_root: Root</code></h3>
+    <p>The <strong>LMD-GHOST vote</strong>. Points to the block the attester considers the head.</p>
+    <ul>
+        <li>Fork choice uses this via <code>update_latest_messages()</code>:</li>
+    </ul>
+    <pre><code class="language-python">store.latest_messages[i] = LatestMessage(
+    epoch=target.epoch, 
+    root=beacon_block_root  # ← this is what counts
+)</code></pre>
+    <ul>
+        <li>Must point to a known block at or before <code>slot</code></li>
+    </ul>
+
+    <h3>4. <code>source: Checkpoint</code></h3>
+    <p>The FFG source—the checkpoint the attester is voting FROM.</p>
+    <ul>
+        <li>Must match <code>state.current_justified_checkpoint</code> or <code>state.previous_justified_checkpoint</code></li>
+    </ul>
+    <pre><code class="language-python">if data.target.epoch == get_current_epoch(state):
+    assert data.source == state.current_justified_checkpoint
+else:
+    assert data.source == state.previous_justified_checkpoint</code></pre>
+
+    <h3>5. <code>target: Checkpoint</code></h3>
+    <p>The FFG target—the checkpoint the attester is voting TO justify.</p>
+    <ul>
+        <li><code>target.epoch</code> must equal <code>compute_epoch_at_slot(data.slot)</code> — you vote for YOUR epoch</li>
+        <li><code>target.root</code> is the block root at the first slot of the target epoch</li>
+    </ul>
+
+    <h2>❓ Why This Structure?</h2>
+    <p>The split between LMD-GHOST and FFG is fundamental to Ethereum's consensus:</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Component</th>
+                <th>Purpose</th>
+                <th>What it affects</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>beacon_block_root</code></td>
+                <td>"Which chain do I think is canonical?"</td>
+                <td>Fork choice (get_head)</td>
+            </tr>
+            <tr>
+                <td><code>source → target</code></td>
+                <td>"I want to finalize this checkpoint"</td>
+                <td>Justification/finalization</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p><strong>Critical insight</strong>: <code>beacon_block_root</code> and <code>target.root</code> are NOT necessarily the same block.</p>
+    <ul>
+        <li><code>beacon_block_root</code>: any block at or before <code>slot</code></li>
+        <li><code>target.root</code>: specifically the block at epoch boundary</li>
+    </ul>
+
+    <p>Fork choice validation ensures consistency:</p>
+    <pre><code class="language-python"># LMD vote must be consistent with FFG vote target
+assert target.root == get_checkpoint_block(
+    store, attestation.data.beacon_block_root, target.epoch
+)</code></pre>
+    <p>Translation: "Your head vote must be a descendant of your target checkpoint."</p>
+
+    <h2>🔗 From AttestationData to On-Chain</h2>
+    <p>AttestationData gets wrapped in multiple containers depending on context:</p>
+    <pre><code>AttestationData (just the vote)
+     ↓
+Attestation (+ aggregation_bits + signature)
+     ↓
+IndexedAttestation (+ explicit validator indices, sorted)</code></pre>
+
+    <p>The <code>aggregation_bits</code> bitlist maps to committee members:</p>
+    <pre><code class="language-python">def get_attesting_indices(state, attestation):
+    committee = get_beacon_committee(state, data.slot, data.index)
+    return set(
+        index for i, index in enumerate(committee) 
+        if attestation.aggregation_bits[i]
+    )</code></pre>
+
+    <h2>⚠️ Gotchas</h2>
+
+    <div class="gotcha">
+        <strong>1. Signature domain uses TARGET epoch</strong>
+        <pre><code class="language-python">domain = get_domain(state, DOMAIN_BEACON_ATTESTER, 
+                    indexed_attestation.data.target.epoch)</code></pre>
+        <p>Not <code>slot</code>. This prevents cross-epoch signature replay.</p>
+    </div>
+
+    <div class="gotcha">
+        <strong>2. Epoch boundary attestations</strong>
+        <p>If you attest in slot 32 (first slot of epoch 1), your target is epoch 1, but your source might be the epoch 0 justified checkpoint. The "previous justified" rule exists because justification lags.</p>
+    </div>
+
+    <div class="gotcha">
+        <strong>3. Empty slot edge case</strong>
+        <p>If slot N had no block, an attestation at slot N still has a valid <code>beacon_block_root</code>—it just points to the most recent block (from slot N-1 or earlier).</p>
+    </div>
+
+    <div class="gotcha">
+        <strong>4. Committee index change (EIP-7549, Electra)</strong>
+        <p>In Electra, the <code>index</code> field remains in AttestationData but is constrained to <code>0</code> (<code>assert data.index == 0</code>). Committee membership moves to a new <code>committee_bits</code> bitvector in the Attestation container. This enables cross-committee aggregation—attestations with identical <code>slot</code>, <code>beacon_block_root</code>, <code>source</code>, <code>target</code> can now aggregate regardless of committee.</p>
+    </div>
+
+    <h2>📖 Summary</h2>
+    <p>AttestationData = 2 votes, 1 signature:</p>
+    <ul>
+        <li><strong>Head vote</strong>: "I think block X is canonical"</li>
+        <li><strong>FFG vote</strong>: "I support finalizing checkpoint C"</li>
+    </ul>
+
+    <p><strong>Tomorrow</strong>: <em>Lesson 32 — IndexedAttestation and Aggregation</em>: how individual votes become efficient on-chain representations via BLS aggregation.</p>
+
+    <hr>
+    <p><em>Lesson 31 of 100 | Module 4: Attestations Deep Dive</em></p>
+</body>
+</html>

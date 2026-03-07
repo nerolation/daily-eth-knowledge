@@ -1,5 +1,11 @@
 [
   {
+    "file": "031-attestation-data-anatomy.html",
+    "title": "AttestationData Anatomy",
+    "date": "2026-03-07",
+    "number": 31
+  },
+  {
     "file": "030-lookahead-proposer-knowledge.html",
     "title": "Lookahead and Proposer Knowledge",
     "date": "2026-03-05",
