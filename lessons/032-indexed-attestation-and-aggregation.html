@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 32: IndexedAttestation and Aggregation</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --code-bg: #161b22;
+            --border: #30363d;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 { color: var(--accent); }
+        h1 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        code {
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9em;
+        }
+        .spec-link {
+            background: var(--code-bg);
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            border-left: 3px solid var(--accent);
+            margin: 1rem 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th { background: var(--code-bg); }
+        .warning {
+            background: #3d2a1e;
+            border-left: 3px solid #f0883e;
+            padding: 0.5rem 1rem;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 32: IndexedAttestation and Aggregation</h1>
+    
+    <div class="spec-link">
+        <strong>Spec Location:</strong><br>
+        • <code>phase0/beacon-chain.md</code> → IndexedAttestation, Attestation, get_indexed_attestation, get_attesting_indices<br>
+        • <code>electra/beacon-chain.md</code> → Modified containers for EIP-7549
+    </div>
+
+    <h2>💡 The Core Problem</h2>
+    <p>Ethereum has ~1M validators. Each slot, ~12,500 validators attest (1/32 of the set). If we stored each attestation individually:</p>
+    <ul>
+        <li>1 signature per validator = 96 bytes × 12,500 = <strong>1.2 MB per slot just for signatures</strong></li>
+    </ul>
+    <p>BLS signatures solve this: <strong>aggregate N signatures into one 96-byte signature</strong>. But we need a data structure to track <em>which</em> validators participated.</p>
+
+    <h2>🛠️ Two Attestation Formats</h2>
+    
+    <h3>1. Attestation (network/block format)</h3>
+    <pre><code class="language-python">class Attestation(Container):
+    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE]
+    data: AttestationData
+    signature: BLSSignature  # Aggregated!</code></pre>
+    <p>The <code>aggregation_bits</code> is a bitfield: position <code>i</code> is set if committee member <code>i</code> participated.</p>
+
+    <h3>2. IndexedAttestation (validation format)</h3>
+    <pre><code class="language-python">class IndexedAttestation(Container):
+    attesting_indices: List[ValidatorIndex, MAX_VALIDATORS_PER_COMMITTEE]
+    data: AttestationData
+    signature: BLSSignature</code></pre>
+    <p><code>attesting_indices</code> lists the actual validator indices — needed to look up public keys for signature verification.</p>
+
+    <h2>🔄 The Conversion: get_indexed_attestation</h2>
+    <pre><code class="language-python">def get_indexed_attestation(state: BeaconState, attestation: Attestation) -> IndexedAttestation:
+    attesting_indices = get_attesting_indices(state, attestation)
+    return IndexedAttestation(
+        attesting_indices=sorted(attesting_indices),  # SORTED!
+        data=attestation.data,
+        signature=attestation.signature,
+    )</code></pre>
+
+    <p>The key helper — <code>get_attesting_indices</code>:</p>
+    <pre><code class="language-python">def get_attesting_indices(state: BeaconState, attestation: Attestation) -> Set[ValidatorIndex]:
+    committee = get_beacon_committee(state, attestation.data.slot, attestation.data.index)
+    return set(index for i, index in enumerate(committee) 
+               if attestation.aggregation_bits[i])</code></pre>
+
+    <p><strong>The flow:</strong></p>
+    <ol>
+        <li>Look up the committee for that slot/index</li>
+        <li>For each set bit in <code>aggregation_bits</code>, include that committee member's <code>ValidatorIndex</code></li>
+        <li><strong>Sort</strong> the indices for the indexed attestation</li>
+    </ol>
+
+    <h2>⚠️ Why Sorted Indices?</h2>
+    <p>BLS aggregate signature verification requires knowing the exact order of public keys. The spec mandates:</p>
+    <pre><code class="language-python"># In is_valid_indexed_attestation:
+indices = indexed_attestation.attesting_indices
+if len(indices) == 0 or not indices == sorted(set(indices)):
+    return False  # Must be sorted AND unique</code></pre>
+
+    <p>Sorting provides:</p>
+    <ol>
+        <li><strong>Determinism</strong> — all clients produce identical IndexedAttestation from same Attestation</li>
+        <li><strong>Uniqueness check</strong> — <code>sorted(set(...))</code> catches duplicates</li>
+        <li><strong>Verification simplicity</strong> — pubkeys in predictable order</li>
+    </ol>
+
+    <h2>🔐 BLS Signature Aggregation</h2>
+    <pre><code class="language-python"># How aggregation works (conceptual):
+# Validator 1: sig_1 = Sign(sk_1, message)
+# Validator 2: sig_2 = Sign(sk_2, message)
+# ...
+# Aggregate: agg_sig = Aggregate([sig_1, sig_2, ...])
+
+# Verification:
+def is_valid_indexed_attestation(state, indexed_attestation):
+    indices = indexed_attestation.attesting_indices
+    
+    # 1. Sorted + unique check
+    if len(indices) == 0 or not indices == sorted(set(indices)):
+        return False
+    
+    # 2. Get all pubkeys in order
+    pubkeys = [state.validators[i].pubkey for i in indices]
+    
+    # 3. Compute what they signed
+    domain = get_domain(state, DOMAIN_BEACON_ATTESTER, 
+                        indexed_attestation.data.target.epoch)
+    signing_root = compute_signing_root(indexed_attestation.data, domain)
+    
+    # 4. Verify aggregate signature
+    return bls.FastAggregateVerify(pubkeys, signing_root, 
+                                   indexed_attestation.signature)</code></pre>
+
+    <p><code>FastAggregateVerify</code> checks that the aggregate signature is valid for:</p>
+    <ul>
+        <li>The <strong>same message</strong> (signing_root)</li>
+        <li>All <strong>pubkeys</strong> in the list</li>
+    </ul>
+    <p>This is O(n) in pubkeys but only <strong>one pairing</strong> for the signature — massive savings vs. n individual verifications.</p>
+
+    <h2>⚡ Electra Changes (EIP-7549)</h2>
+    <p>Pre-Electra: each committee produces separate attestations. Post-Electra: <strong>aggregate across committees</strong>.</p>
+
+    <h3>Modified Attestation</h3>
+    <pre><code class="language-python">class Attestation(Container):
+    # NOW: covers ALL committees in the slot
+    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
+    data: AttestationData  # index field now unused!
+    signature: BLSSignature
+    committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]  # NEW: which committees</code></pre>
+
+    <h3>Modified IndexedAttestation</h3>
+    <pre><code class="language-python">class IndexedAttestation(Container):
+    # Larger list — can hold validators from multiple committees
+    attesting_indices: List[ValidatorIndex, 
+                            MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
+    data: AttestationData
+    signature: BLSSignature</code></pre>
+
+    <h3>Modified get_attesting_indices</h3>
+    <pre><code class="language-python">def get_attesting_indices(state, attestation):
+    output: Set[ValidatorIndex] = set()
+    committee_indices = get_committee_indices(attestation.committee_bits)
+    committee_offset = 0
+    
+    for committee_index in committee_indices:
+        committee = get_beacon_committee(state, attestation.data.slot, committee_index)
+        committee_attesters = set(
+            attester_index
+            for i, attester_index in enumerate(committee)
+            if attestation.aggregation_bits[committee_offset + i]
+        )
+        output = output.union(committee_attesters)
+        committee_offset += len(committee)
+    
+    return output</code></pre>
+
+    <p><strong>Impact:</strong> ~4x reduction in attestation data per block.</p>
+
+    <h2>🔗 Connections</h2>
+    <ul>
+        <li><strong>AttesterSlashing</strong> uses IndexedAttestation — needs explicit indices to identify who to slash</li>
+        <li><strong>Fork choice</strong> uses get_attesting_indices to weight votes</li>
+        <li><strong>Rewards</strong> use get_attesting_indices to credit participation</li>
+        <li><strong>Aggregators</strong> (Lesson 38) select who produces aggregates</li>
+    </ul>
+
+    <h2>⚠️ Gotchas</h2>
+    <div class="warning">
+        <ol>
+            <li><strong>Empty attestation = invalid.</strong> <code>len(indices) == 0</code> fails validation.</li>
+            <li><strong>Duplicates are forbidden.</strong> <code>sorted(set(indices))</code> catches this — a validator can't vote twice in one attestation.</li>
+            <li><strong>Same message requirement.</strong> BLS aggregation only works when all signers signed the <em>same</em> AttestationData. Different data = different aggregates.</li>
+            <li><strong>Committee ≠ Indices.</strong> Committee is a <em>position list</em> (who's in slot 0, 1, 2...). Indices are <em>validator IDs</em>. The bitfield maps positions to participation.</li>
+        </ol>
+    </div>
+
+    <h2>📖 Summary</h2>
+    <table>
+        <tr>
+            <th>Format</th>
+            <th>Use</th>
+            <th>Key Feature</th>
+        </tr>
+        <tr>
+            <td>Attestation</td>
+            <td>Network, blocks</td>
+            <td>Compact bitfield</td>
+        </tr>
+        <tr>
+            <td>IndexedAttestation</td>
+            <td>Validation, slashing</td>
+            <td>Explicit indices</td>
+        </tr>
+    </table>
+
+    <p>The transformation: <code>bitfield + committee</code> → <code>sorted validator indices</code></p>
+
+    <p><strong>Next:</strong> Lesson 33 — Attestation Inclusion Delay</p>
+</body>
+</html>
