@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesson 33: Attestation Inclusion Delay | Daily Ethereum Knowledge</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent-subtle: #1f6feb;
+            --code-bg: #0d1117;
+            --success: #3fb950;
+            --warning: #d29922;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: var(--accent);
+            font-size: 1.75rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.75rem;
+        }
+        
+        .subtitle {
+            color: var(--text-muted);
+            font-style: italic;
+            margin-bottom: 2rem;
+        }
+        
+        h2 {
+            color: var(--text);
+            font-size: 1.25rem;
+            margin: 2rem 0 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        h2::before {
+            font-size: 1.25rem;
+        }
+        
+        .spec-location {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        
+        .spec-location ul {
+            list-style: none;
+            margin: 0;
+        }
+        
+        .spec-location li {
+            padding: 0.25rem 0;
+        }
+        
+        .spec-location code {
+            color: var(--accent);
+            background: var(--code-bg);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+            font-size: 0.875rem;
+        }
+        
+        code {
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            color: var(--text);
+        }
+        
+        .keyword { color: #ff7b72; }
+        .function { color: #d2a8ff; }
+        .string { color: #a5d6ff; }
+        .number { color: #79c0ff; }
+        .comment { color: #8b949e; font-style: italic; }
+        .type { color: #7ee787; }
+        
+        p {
+            margin: 1rem 0;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.75rem;
+            text-align: left;
+        }
+        
+        th {
+            background: var(--card-bg);
+            color: var(--accent);
+            font-weight: 600;
+        }
+        
+        tr:nth-child(even) {
+            background: var(--card-bg);
+        }
+        
+        .gotcha {
+            background: rgba(210, 153, 34, 0.1);
+            border-left: 3px solid var(--warning);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 6px 6px 0;
+        }
+        
+        .gotcha-title {
+            color: var(--warning);
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        
+        .connections {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 2rem 0;
+        }
+        
+        .connections ul {
+            margin: 0.5rem 0 0 1.5rem;
+        }
+        
+        .connections li {
+            margin: 0.5rem 0;
+        }
+        
+        .next-lesson {
+            text-align: center;
+            padding: 1.5rem;
+            background: var(--card-bg);
+            border-radius: 6px;
+            margin-top: 2rem;
+        }
+        
+        .next-lesson p {
+            color: var(--text-muted);
+            margin: 0;
+        }
+        
+        .next-lesson strong {
+            color: var(--accent);
+        }
+        
+        .highlight {
+            background: rgba(88, 166, 255, 0.15);
+            padding: 0.15rem 0.3rem;
+            border-radius: 3px;
+        }
+
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-bottom: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Lesson 33: Attestation Inclusion Delay</h1>
+    <p class="subtitle">The timing window that turns raw attestations into on-chain state transitions</p>
+    <p class="meta">March 9, 2026 • Module 4: Attestations Deep Dive</p>
+
+    <h2>🔍 Spec Location</h2>
+    <div class="spec-location">
+        <ul>
+            <li><code>phase0/beacon-chain.md</code> → Time parameters, <code>process_attestation</code></li>
+            <li><code>altair/beacon-chain.md</code> → <code>get_attestation_participation_flag_indices</code></li>
+        </ul>
+    </div>
+
+    <h2>💡 Core Concept</h2>
+    <p>Attestations can't be included in the same slot they attest to. There's a mandatory gap:</p>
+    
+    <pre><code><span class="comment"># Time parameters from phase0/beacon-chain.md</span>
+MIN_ATTESTATION_INCLUSION_DELAY = <span class="number">1</span> slot (<span class="number">12</span> seconds)
+Maximum window = SLOTS_PER_EPOCH = <span class="number">32</span> slots</code></pre>
+
+    <p>This creates a timing constraint that affects both correctness and rewards:</p>
+
+    <pre><code><span class="keyword">assert</span> data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot <= data.slot + SLOTS_PER_EPOCH</code></pre>
+
+    <p>An attestation for slot N can be included in slots N+1 through N+32 (same epoch or the following epoch boundary).</p>
+
+    <h3>Why the 1-slot minimum?</h3>
+    <p>When you attest, you're voting for the block at <code>data.slot</code>. That block hasn't been processed yet when you create the attestation—you only see its root. The proposer of slot N+1 needs to:</p>
+    <ol>
+        <li>See your attestation (network propagation)</li>
+        <li>Verify it against processed state</li>
+        <li>Include it in their block</li>
+    </ol>
+    <p>Including in the same slot would require attesters to vote on a block they haven't fully validated. The 1-slot delay ensures attesters have seen and processed the block they're voting for.</p>
+
+    <h2>🛠 Phase 0: The Inclusion Delay Reward</h2>
+    <p>In Phase 0, inclusion delay directly affected rewards through inverse scaling:</p>
+
+    <pre><code><span class="keyword">class</span> <span class="type">PendingAttestation</span>(Container):
+    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE]
+    data: AttestationData
+    inclusion_delay: Slot  <span class="comment"># state.slot - data.slot</span>
+    proposer_index: ValidatorIndex</code></pre>
+
+    <pre><code><span class="keyword">def</span> <span class="function">get_inclusion_delay_deltas</span>(state, ...):
+    <span class="keyword">for</span> index <span class="keyword">in</span> attesting_indices:
+        attestation = <span class="function">min</span>(attestations, key=<span class="keyword">lambda</span> a: a.inclusion_delay)
+        max_attester_reward = base_reward - proposer_reward
+        rewards[index] += max_attester_reward // attestation.inclusion_delay</code></pre>
+
+    <table>
+        <tr>
+            <th>Inclusion Slot</th>
+            <th>Delay</th>
+            <th>Reward</th>
+        </tr>
+        <tr>
+            <td>N+1</td>
+            <td>1</td>
+            <td>100% of max</td>
+        </tr>
+        <tr>
+            <td>N+2</td>
+            <td>2</td>
+            <td>50% of max</td>
+        </tr>
+        <tr>
+            <td>N+5</td>
+            <td>5</td>
+            <td>20% of max</td>
+        </tr>
+    </table>
+
+    <p>This created strong economic pressure for fast inclusion, but also some problems:</p>
+    <ul>
+        <li>Validators near the slot boundary got disadvantaged</li>
+        <li>Network latency variations caused unfair reward differences</li>
+        <li>The proposer who included an attestation also got rewarded, creating inclusion races</li>
+    </ul>
+
+    <h2>🛠 Altair: Participation Flags with Timeliness</h2>
+    <p>Altair replaced the continuous reward scaling with discrete timeliness thresholds:</p>
+
+    <pre><code><span class="keyword">def</span> <span class="function">get_attestation_participation_flag_indices</span>(
+    state, data, inclusion_delay
+) -> Sequence[<span class="type">int</span>]:
+    participation_flag_indices = []
+    
+    <span class="comment"># Source: must be included within sqrt(32) ≈ 5 slots</span>
+    <span class="keyword">if</span> is_matching_source <span class="keyword">and</span> inclusion_delay <= <span class="function">integer_squareroot</span>(SLOTS_PER_EPOCH):
+        participation_flag_indices.append(TIMELY_SOURCE_FLAG_INDEX)
+    
+    <span class="comment"># Target: must be included within same epoch (32 slots)</span>
+    <span class="keyword">if</span> is_matching_target <span class="keyword">and</span> inclusion_delay <= SLOTS_PER_EPOCH:
+        participation_flag_indices.append(TIMELY_TARGET_FLAG_INDEX)
+    
+    <span class="comment"># Head: must be included in exactly the next slot</span>
+    <span class="keyword">if</span> is_matching_head <span class="keyword">and</span> inclusion_delay == MIN_ATTESTATION_INCLUSION_DELAY:
+        participation_flag_indices.append(TIMELY_HEAD_FLAG_INDEX)
+    
+    <span class="keyword">return</span> participation_flag_indices</code></pre>
+
+    <table>
+        <tr>
+            <th>Flag</th>
+            <th>Deadline</th>
+            <th>Weight</th>
+            <th>Rationale</th>
+        </tr>
+        <tr>
+            <td>TIMELY_HEAD</td>
+            <td>1 slot</td>
+            <td>14/64</td>
+            <td>Fork choice needs fresh votes</td>
+        </tr>
+        <tr>
+            <td>TIMELY_SOURCE</td>
+            <td>5 slots</td>
+            <td>14/64</td>
+            <td>FFG source still useful briefly</td>
+        </tr>
+        <tr>
+            <td>TIMELY_TARGET</td>
+            <td>32 slots</td>
+            <td>26/64</td>
+            <td>FFG target valid all epoch</td>
+        </tr>
+    </table>
+
+    <h2>❓ Why This Design?</h2>
+    
+    <p><strong>Head votes have the strictest deadline (1 slot)</strong> because LMD-GHOST fork choice runs every slot. A head vote for slot N arriving at slot N+3 is useless—fork choice has already moved on. Might as well give no credit.</p>
+    
+    <p><strong>Source votes get 5 slots</strong> because they contribute to justification, which happens at epoch boundaries. But they're still time-sensitive for network consistency. The sqrt(32) choice is somewhat arbitrary but provides a reasonable window.</p>
+    
+    <p><strong>Target votes get the full epoch</strong> because they directly contribute to finalization. A target vote for epoch E is valid anywhere in epoch E or E+1 (until epoch boundary processing). Maximum flexibility here because finality is the priority.</p>
+    
+    <p><strong>The Phase 0 → Altair shift</strong> moved from "continuous penalty for delay" to "binary thresholds." This is fairer: a validator with 500ms network latency isn't perpetually disadvantaged vs one with 50ms. Either you make the deadline or you don't.</p>
+
+    <h2>⚠️ Gotchas</h2>
+    
+    <div class="gotcha">
+        <div class="gotcha-title">1. Head rewards are basically MEV-adjacent</div>
+        <p>To get TIMELY_HEAD credit, your attestation must be in the <em>very next block</em>. If that proposer doesn't include you (or misses their slot), you lose 14/64 of your attestation reward. This creates proposer-attester coordination incentives.</p>
+    </div>
+
+    <div class="gotcha">
+        <div class="gotcha-title">2. The epoch boundary is sharp</div>
+        <p>An attestation for slot 31 of epoch E can be included in slots 32-63 (epoch E+1). But the check is <code>data.slot + SLOTS_PER_EPOCH</code>, not "same or next epoch." There's a subtle off-by-one trap for implementations.</p>
+    </div>
+
+    <div class="gotcha">
+        <div class="gotcha-title">3. Double-inclusion protection</div>
+        <p>Altair uses participation flags, not attestation lists. Once <code>epoch_participation[index]</code> has a flag set, including another attestation from that validator for the same epoch just wastes block space—no additional reward.</p>
+    </div>
+
+    <div class="connections">
+        <h3>🔗 Connections</h3>
+        <ul>
+            <li><strong>Lesson 31</strong> (AttestationData): The structure being timed</li>
+            <li><strong>Lesson 32</strong> (IndexedAttestation): How attestations are aggregated</li>
+            <li><strong>Lesson 34</strong> (Participation Flags): How flags replaced PendingAttestation</li>
+            <li><strong>Lesson 42</strong> (Proposer Boost): Timing interacts with fork choice</li>
+        </ul>
+    </div>
+
+    <div class="next-lesson">
+        <p><em>Tomorrow:</em> <strong>Lesson 34 — Participation Flags (Altair)</strong></p>
+    </div>
+</body>
+</html>

@@ -1,5 +1,11 @@
 [
   {
+    "file": "033-attestation-inclusion-delay.html",
+    "title": "Attestation Inclusion Delay",
+    "date": "2026-03-09",
+    "number": 33
+  },
+  {
     "file": "032-indexed-attestation-and-aggregation.html",
     "title": "IndexedAttestation and Aggregation",
     "date": "2026-03-08",
